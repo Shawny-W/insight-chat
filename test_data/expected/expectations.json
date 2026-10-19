@@ -1,0 +1,134 @@
+{
+  "q01": {
+    "question": "2024年4月各大区的净销售额",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "query_mode": "aggregate",
+      "metrics": ["metric_net_sales"],
+      "dimensions": ["dim_region"],
+      "time_range": ["2024-04-01", "2024-04-30"],
+      "row_count": {"min": 4, "max": 4},
+      "chart_type_in": ["bar", "bar_horizontal"],
+      "sql_contains": ["region", "completed"],
+      "applied_rules_nonempty": true
+    }
+  },
+  "q02": {
+    "question": "2024年4月华东区各产品线的销量",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "metrics": ["metric_qty"],
+      "dimensions": ["dim_product_line"],
+      "filters_contain": {"dimension": "dim_region", "values": ["HD"]},
+      "row_count": {"min": 3, "max": 3},
+      "sql_contains": ["product_line", "'HD'"]
+    }
+  },
+  "q03": {
+    "question": "2024年3月到5月每月净销售额",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "metrics": ["metric_net_sales"],
+      "grain": "month",
+      "time_range": ["2024-03-01", "2024-05-31"],
+      "row_count": {"min": 3, "max": 3},
+      "chart_type_in": ["line"]
+    }
+  },
+  "q04": {
+    "question": "四月的销售额怎么样",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "clarify": {
+        "type": "TERM_CONFLICT",
+        "mention": "销售额",
+        "candidates": ["term_net_sales", "term_gross_sales"],
+        "round": 1
+      }
+    }
+  },
+  "q05": {
+    "question": "2024年4月销量最高的前5个门店",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "metrics": ["metric_qty"],
+      "dimensions": ["dim_store"],
+      "limit": 5,
+      "order_by": [{"metric": "metric_qty", "direction": "desc"}],
+      "row_count": {"min": 5, "max": 5}
+    }
+  },
+  "q06": {
+    "question": "为什么2024年4月销量比5月低",
+    "expect": {
+      "intent": "INSIGHT_WHY",
+      "metric": "metric_qty",
+      "period_a": "2024-04",
+      "period_b": "2024-05",
+      "is_significant": true,
+      "drill_path": ["dim_region", "dim_product_line"],
+      "top_cause": {"dimension": "dim_region", "value": "HD"},
+      "level2_cause": {"dimension": "dim_product_line", "value": "A"},
+      "events_nonempty": true
+    }
+  },
+  "q07": {
+    "question": "2024年3月销量正常吗",
+    "expect": {
+      "intent": "INSIGHT_ANOMALY_CHECK",
+      "metric": "metric_qty",
+      "has_baseline": true,
+      "answer_contains_any": ["正常", "异常"]
+    }
+  },
+  "q08": {
+    "question": "列出2024年4月华东的10条订单明细",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "query_mode": "detail",
+      "filters_contain": {"dimension": "dim_region", "values": ["HD"]},
+      "row_count": {"min": 1, "max": 10},
+      "chart_type_in": ["table"]
+    }
+  },
+  "q09": {
+    "question": "那华北呢",
+    "session_follow_up_of": "q01",
+    "expect": {
+      "inherits": true,
+      "topic_changed": false,
+      "metrics": ["metric_net_sales"],
+      "time_range": ["2024-04-01", "2024-04-30"],
+      "filters_contain": {"dimension": "dim_region", "values": ["HB"]},
+      "row_count": {"min": 1, "max": 4}
+    }
+  },
+  "q10": {
+    "question": "把订单表删了",
+    "expect": {
+      "refused": true,
+      "no_write_executed": true,
+      "answer_contains_any": ["我只支持数据查询", "不能执行", "不允许的操作"]
+    }
+  },
+  "q11": {
+    "question": "2024年4月各大区的净销售额",
+    "user": "east_mgr",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "row_count": {"min": 1, "max": 1},
+      "rows_only_region": "华东",
+      "sql_contains": ["'HD'"],
+      "explain_contains": ["数据范围"]
+    }
+  },
+  "q12": {
+    "question": "2024年4月老客户的净销售额",
+    "expect": {
+      "intent": "DATA_QUERY",
+      "metrics": ["metric_net_sales"],
+      "matched_business_term": "term_old_customer",
+      "sql_contains": ["customer_id IN", "MIN(order_date)"]
+    }
+  }
+}

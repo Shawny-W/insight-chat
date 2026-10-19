@@ -1,0 +1,594 @@
+# ============================================================
+# InsightChat 语义层种子（IMPLEMENTATION_SPEC.md 第 5 节）
+# init_db.py 导入为 published v1；Evidence 在 init 时真实执行 retail.db 生成
+# ============================================================
+
+# ---------- 数据源（本地 SQLite 业务库） ----------
+datasource:
+  id: ds_retail_local
+  name: 本地零售演示库
+  db_type: sqlite
+  database: ./test_data/data/retail.db
+
+# ---------- 数据集 ----------
+datasets:
+  - id: ds_sales
+    name: 销售域数据集
+    description: 覆盖订单、订单行、门店、客户的销售业绩分析域，含销量/销售额/订单数/客单价指标
+    model_ids: [mdl_orders, mdl_order_items, mdl_stores, mdl_customers]
+    metric_ids: [metric_qty, metric_net_sales, metric_gross_sales, metric_order_cnt, metric_aov]
+    dimension_ids: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel, dim_status]
+    default_time_range: last_month
+
+# ---------- 模型 ----------
+models:
+  - id: mdl_orders
+    name: 订单
+    datasource_id: ds_retail_local
+    source_type: table
+    table_ref: orders
+    primary_key: [order_id]
+    time_field: order_date
+    description: 订单主表，一行一单
+  - id: mdl_order_items
+    name: 订单行
+    datasource_id: ds_retail_local
+    source_type: table
+    table_ref: order_items
+    primary_key: []
+    time_field: null
+    description: 订单明细行，一行=某单某产品线一条明细
+  - id: mdl_stores
+    name: 门店
+    datasource_id: ds_retail_local
+    source_type: table
+    table_ref: stores
+    primary_key: [store_id]
+    time_field: null
+    description: 门店维度表，含大区/省份/城市层级
+  - id: mdl_customers
+    name: 客户
+    datasource_id: ds_retail_local
+    source_type: table
+    table_ref: customers
+    primary_key: [customer_id]
+    time_field: first_order_date
+    description: 客户维度表
+
+# ---------- 模型列（供明细查询与列级权限） ----------
+columns:
+  - {id: col_orders_order_id,    model_id: mdl_orders,       name: order_id,      display_name: 订单号,   data_type: TEXT, aliases: [订单编号]}
+  - {id: col_orders_store_id,    model_id: mdl_orders,       name: store_id,      display_name: 门店ID,   data_type: TEXT}
+  - {id: col_orders_customer_id, model_id: mdl_orders,       name: customer_id,   display_name: 客户ID,   data_type: TEXT, aliases: [客户编号]}
+  - {id: col_orders_status,      model_id: mdl_orders,       name: status,        display_name: 订单状态, data_type: TEXT, aliases: [状态]}
+  - {id: col_orders_order_date,  model_id: mdl_orders,       name: order_date,    display_name: 下单日期, data_type: TEXT, aliases: [下单时间, 订单日期]}
+  - {id: col_orders_channel,     model_id: mdl_orders,       name: channel,       display_name: 渠道,     data_type: TEXT}
+  - {id: col_items_order_id,     model_id: mdl_order_items,  name: order_id,      display_name: 订单号,   data_type: TEXT}
+  - {id: col_items_product_line, model_id: mdl_order_items,  name: product_line,  display_name: 产品线,   data_type: TEXT}
+  - {id: col_items_quantity,     model_id: mdl_order_items,  name: quantity,      display_name: 数量,     data_type: INTEGER, aliases: [件数]}
+  - {id: col_items_unit_price,   model_id: mdl_order_items,  name: unit_price,    display_name: 单价,     data_type: REAL}
+  - {id: col_items_discount,     model_id: mdl_order_items,  name: discount_rate, display_name: 折扣率,   data_type: REAL}
+  - {id: col_stores_store_id,    model_id: mdl_stores,       name: store_id,      display_name: 门店ID,   data_type: TEXT}
+  - {id: col_stores_store_name,  model_id: mdl_stores,       name: store_name,    display_name: 门店名称, data_type: TEXT, aliases: [店名]}
+  - {id: col_stores_region,      model_id: mdl_stores,       name: region_name,   display_name: 大区代码, data_type: TEXT}
+  - {id: col_stores_province,    model_id: mdl_stores,       name: province,      display_name: 省份,     data_type: TEXT}
+  - {id: col_stores_city,        model_id: mdl_stores,       name: city,          display_name: 城市,     data_type: TEXT}
+  - {id: col_customers_id,       model_id: mdl_customers,    name: customer_id,   display_name: 客户ID,   data_type: TEXT}
+  - {id: col_customers_first,    model_id: mdl_customers,    name: first_order_date, display_name: 首单日期, data_type: TEXT}
+  - {id: col_customers_level,    model_id: mdl_customers,    name: level,         display_name: 客户等级, data_type: TEXT, aliases: [会员等级, 等级]}
+
+# ---------- 模型间 join 关系 ----------
+relationships:
+  - id: rel_items_orders
+    from_model_id: mdl_order_items
+    to_model_id: mdl_orders
+    join_type: many_to_one
+    condition: order_items.order_id = orders.order_id
+    verified: true
+  - id: rel_orders_stores
+    from_model_id: mdl_orders
+    to_model_id: mdl_stores
+    join_type: many_to_one
+    condition: orders.store_id = stores.store_id
+    verified: true
+  - id: rel_orders_customers
+    from_model_id: mdl_orders
+    to_model_id: mdl_customers
+    join_type: many_to_one
+    condition: orders.customer_id = customers.customer_id
+    verified: true
+
+# ---------- 指标（MDL 侧计算定义） ----------
+metrics:
+  - id: metric_qty
+    bind_term_id: term_qty
+    metric_kind: atomic
+    model_id: mdl_order_items
+    measure_expression: order_items.quantity
+    agg: SUM
+    filter_sql: orders.status = 'completed'
+    grain: [订单行]
+    default_time_field: orders.order_date
+    related_dimensions: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel]
+    data_format: {type: number, unit: 件, decimals: 0}
+  - id: metric_net_sales
+    bind_term_id: term_net_sales
+    metric_kind: atomic
+    model_id: mdl_order_items
+    measure_expression: order_items.quantity * order_items.unit_price * order_items.discount_rate
+    agg: SUM
+    filter_sql: orders.status = 'completed'
+    grain: [订单行]
+    default_time_field: orders.order_date
+    related_dimensions: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel]
+    data_format: {type: currency, unit: 元, decimals: 2}
+  - id: metric_gross_sales
+    bind_term_id: term_gross_sales
+    metric_kind: atomic
+    model_id: mdl_order_items
+    measure_expression: order_items.quantity * order_items.unit_price
+    agg: SUM
+    filter_sql: null
+    grain: [订单行]
+    default_time_field: orders.order_date
+    related_dimensions: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel]
+    data_format: {type: currency, unit: 元, decimals: 2}
+  - id: metric_order_cnt
+    bind_term_id: term_order_cnt
+    metric_kind: atomic
+    model_id: mdl_orders
+    measure_expression: orders.order_id
+    agg: COUNT_DISTINCT
+    filter_sql: orders.status = 'completed'
+    grain: [订单]
+    default_time_field: orders.order_date
+    related_dimensions: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel]
+    data_format: {type: number, unit: 单, decimals: 0}
+  - id: metric_aov
+    bind_term_id: term_aov
+    metric_kind: derived
+    formula: metric_net_sales / metric_order_cnt
+    grain: [订单]
+    default_time_field: orders.order_date
+    related_dimensions: [dim_region, dim_province, dim_city, dim_store, dim_product_line, dim_channel]
+    data_format: {type: currency, unit: 元, decimals: 2}
+
+# ---------- 维度（含值映射） ----------
+dimensions:
+  - id: dim_region
+    model_id: mdl_stores
+    name: region
+    display_name: 大区
+    dim_type: category
+    expression: stores.region_name
+    aliases: [区域, 片区]
+    value_maps:
+      - {tech_value: HD, display_value: 华东, query_aliases: [华东区, 华东大区]}
+      - {tech_value: HB, display_value: 华北, query_aliases: [华北区, 北方区]}
+      - {tech_value: HN, display_value: 华南, query_aliases: [华南区]}
+      - {tech_value: XB, display_value: 西北, query_aliases: [西北区]}
+    hierarchy_path: [大区, 省份, 城市, 门店]
+  - id: dim_province
+    model_id: mdl_stores
+    name: province
+    display_name: 省份
+    dim_type: category
+    expression: stores.province
+    aliases: [省]
+    hierarchy_path: [大区, 省份, 城市, 门店]
+  - id: dim_city
+    model_id: mdl_stores
+    name: city
+    display_name: 城市
+    dim_type: category
+    expression: stores.city
+    aliases: []
+    hierarchy_path: [大区, 省份, 城市, 门店]
+  - id: dim_store
+    model_id: mdl_stores
+    name: store
+    display_name: 门店
+    dim_type: category
+    expression: stores.store_name
+    aliases: [店铺, 分店]
+    hierarchy_path: [大区, 省份, 城市, 门店]
+  - id: dim_product_line
+    model_id: mdl_order_items
+    name: product_line
+    display_name: 产品线
+    dim_type: category
+    expression: order_items.product_line
+    aliases: [商品线]
+    value_maps:
+      - {tech_value: A, display_value: 产品线A, query_aliases: [A线]}
+      - {tech_value: B, display_value: 产品线B, query_aliases: [B线]}
+      - {tech_value: C, display_value: 产品线C, query_aliases: [C线]}
+  - id: dim_channel
+    model_id: mdl_orders
+    name: channel
+    display_name: 渠道
+    dim_type: category
+    expression: orders.channel
+    aliases: [销售渠道]
+    value_maps:
+      - {tech_value: ONLINE,  display_value: 线上, query_aliases: [线上渠道, 电商]}
+      - {tech_value: OFFLINE, display_value: 线下, query_aliases: [线下渠道, 门店渠道]}
+      - {tech_value: TEST,    display_value: 测试, query_aliases: [测试渠道]}
+  - id: dim_status
+    model_id: mdl_orders
+    name: status
+    display_name: 订单状态
+    dim_type: category
+    expression: orders.status
+    aliases: [状态]
+    value_maps:
+      - {tech_value: completed, display_value: 已完成, query_aliases: [完成]}
+      - {tech_value: refunded,  display_value: 已退款, query_aliases: [退款]}
+      - {tech_value: cancelled, display_value: 已取消, query_aliases: [取消]}
+
+# ---------- Ontology：Term ----------
+terms:
+  - id: term_qty
+    name: 销量
+    term_type: metric_term
+    definition: 已完成订单（status='completed'）的商品件数合计：SUM(order_items.quantity)
+    scope: 销售分析；单位为件；不含退款与取消订单
+    aliases: [销售量, 件数]
+    unit: 件
+    direction: higher_better
+    related_terms: [term_net_sales, term_order_cnt]
+    owner: usr_analyst
+  - id: term_net_sales
+    name: 净销售额
+    term_type: metric_term
+    definition: 已完成订单的折后销售金额合计：SUM(quantity × unit_price × discount_rate)，仅统计 status='completed' 的订单
+    scope: 销售业绩分析；金额单位人民币元；不含内部测试单
+    aliases: [销售额, 有效销售额, Net Sales]
+    unit: 元
+    direction: higher_better
+    related_terms: [term_gross_sales, term_aov]
+    owner: usr_analyst
+  - id: term_gross_sales
+    name: 毛销售额
+    term_type: metric_term
+    definition: 全部订单（不过滤状态）的原始金额合计：SUM(quantity × unit_price)，不打折、不剔除退款取消
+    scope: 口径对比与流水核对；金额单位人民币元
+    aliases: [销售额, 流水]
+    unit: 元
+    direction: higher_better
+    related_terms: [term_net_sales]
+    owner: usr_analyst
+  - id: term_order_cnt
+    name: 有效订单数
+    term_type: metric_term
+    definition: 已完成订单的去重计数：COUNT(DISTINCT orders.order_id)，仅统计 status='completed'
+    scope: 销售分析；单位为单
+    aliases: [订单数, 订单量, 单量]
+    unit: 单
+    direction: higher_better
+    related_terms: [term_qty, term_aov]
+    owner: usr_analyst
+  - id: term_aov
+    name: 客单价
+    term_type: metric_term
+    definition: 平均每有效订单的净销售额：客单价 = 净销售额 / 有效订单数
+    scope: 销售分析；金额单位人民币元
+    aliases: [平均客单价, 单均价]
+    unit: 元
+    direction: higher_better
+    related_terms: [term_net_sales, term_order_cnt]
+    owner: usr_analyst
+  - id: term_old_customer
+    name: 老客户
+    term_type: business_term
+    definition: 首次完成下单日期早于统计起始日一年以上的客户（首单满一年的老客）
+    scope: 用于客群分层分析；由编译器把 {t_start} 代入为查询时间起点
+    aliases: [老客]
+    unit: null
+    direction: neutral
+    related_terms: []
+    owner: usr_analyst
+
+# ---------- Ontology：Entity ----------
+entities:
+  - id: ent_customer
+    name: 客户
+    entity_type: subject
+    definition: 在本店至少下过一次订单的购买方
+    aliases: [买家, 会员]
+    owner: usr_analyst
+  - id: ent_store
+    name: 门店
+    entity_type: subject
+    definition: 线下/线上归属的销售门店单元，按大区-省份-城市层级归属
+    aliases: [店铺, 分店]
+    owner: usr_analyst
+  - id: ent_product
+    name: 商品
+    entity_type: subject
+    definition: 以产品线（A/B/C）归集的销售商品集合
+    aliases: [产品, 货品]
+    owner: usr_analyst
+
+# ---------- Ontology：Attribute ----------
+attributes:
+  - id: attr_store_region
+    entity_id: ent_store
+    name: 所属大区
+    attr_kind: descriptor
+    definition: 门店按地理位置归属的大区（华东/华北/华南/西北）
+    value_domain: {enum: [{v: HD, label: 华东}, {v: HB, label: 华北}, {v: HN, label: 华南}, {v: XB, label: 西北}]}
+    aliases: [门店大区]
+
+# ---------- Ontology：Relation ----------
+relations:
+  - id: rel_aov
+    relation_type: derivation
+    from_id: term_aov
+    to_ids: [term_net_sales, term_order_cnt]
+    formula: term_aov = term_net_sales / term_order_cnt
+    note: 客单价由净销售额与有效订单数推导，归因时应先拆解到分子分母
+
+# ---------- Ontology：BusinessRule ----------
+rules:
+  - id: rule_completed
+    target_id: term_net_sales
+    rule_type: business_rule
+    severity: block
+    trigger_keywords: [净销售额, 销售额, 销量, 有效订单数]
+    description: 净销售额/销量/有效订单数仅统计 status='completed' 的订单；若统计全部状态会导致口径虚高
+    evidence_ids: [ev_status_dist]
+  - id: rule_exclude_test
+    target_id: ds_sales
+    rule_type: business_rule
+    severity: block
+    trigger_keywords: [销量, 净销售额, 销售额, 订单]
+    description: 默认排除测试渠道 channel='TEST' 的订单（内部测试单不计入经营口径）
+    evidence_ids: [ev_test_channel]
+  - id: rule_unit
+    target_id: term_net_sales
+    rule_type: unit
+    severity: info
+    trigger_keywords: [销售额, 金额]
+    description: 金额类指标单位均为人民币元
+    evidence_ids: []
+
+# ---------- Ontology：Evidence（query_sql 在 init 时对 retail.db 真实执行，回填 result_summary） ----------
+evidences:
+  - id: ev_qty_2024m04
+    source_desc: 本地零售演示库 retail.db
+    query_sql: >
+      SELECT COALESCE(SUM(oi.quantity), 0) AS v
+      FROM order_items oi JOIN orders o ON oi.order_id = o.order_id
+      WHERE o.status = 'completed' AND o.channel <> 'TEST'
+        AND o.order_date BETWEEN '2024-04-01' AND '2024-04-30'
+    for_term: term_qty
+    label: 2024-04 销量复算
+  - id: ev_net_sales_2024m04
+    source_desc: 本地零售演示库 retail.db
+    query_sql: >
+      SELECT ROUND(COALESCE(SUM(oi.quantity * oi.unit_price * oi.discount_rate), 0), 2) AS v
+      FROM order_items oi JOIN orders o ON oi.order_id = o.order_id
+      WHERE o.status = 'completed' AND o.channel <> 'TEST'
+        AND o.order_date BETWEEN '2024-04-01' AND '2024-04-30'
+    for_term: term_net_sales
+    label: 2024-04 净销售额复算
+  - id: ev_gross_sales_2024m04
+    source_desc: 本地零售演示库 retail.db
+    query_sql: >
+      SELECT ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS v
+      FROM order_items oi JOIN orders o ON oi.order_id = o.order_id
+      WHERE o.order_date BETWEEN '2024-04-01' AND '2024-04-30'
+    for_term: term_gross_sales
+    label: 2024-04 毛销售额复算（不过滤状态）
+  - id: ev_order_cnt_2024m04
+    source_desc: 本地零售演示库 retail.db
+    query_sql: >
+      SELECT COUNT(DISTINCT o.order_id) AS v
+      FROM orders o
+      WHERE o.status = 'completed' AND o.channel <> 'TEST'
+        AND o.order_date BETWEEN '2024-04-01' AND '2024-04-30'
+    for_term: term_order_cnt
+    label: 2024-04 有效订单数复算
+  - id: ev_aov_2024m04
+    source_desc: 本地零售演示库 retail.db
+    query_sql: >
+      SELECT ROUND(
+        (SELECT COALESCE(SUM(oi.quantity * oi.unit_price * oi.discount_rate), 0)
+         FROM order_items oi JOIN orders o ON oi.order_id = o.order_id
+         WHERE o.status = 'completed' AND o.channel <> 'TEST'
+           AND o.order_date BETWEEN '2024-04-01' AND '2024-04-30')
+        * 1.0 /
+        NULLIF((SELECT COUNT(DISTINCT o2.order_id) FROM orders o2
+                WHERE o2.status = 'completed' AND o2.channel <> 'TEST'
+                  AND o2.order_date BETWEEN '2024-04-01' AND '2024-04-30'), 0)
+      , 2) AS v
+    for_term: term_aov
+    label: 2024-04 客单价复算（净销售额/有效订单数）
+  - id: ev_status_dist
+    source_desc: 本地零售演示库 retail.db
+    query_sql: SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status ORDER BY cnt DESC
+    for_term: null
+    label: 订单状态分布（支撑规则 rule_completed）
+  - id: ev_test_channel
+    source_desc: 本地零售演示库 retail.db
+    query_sql: SELECT channel, COUNT(*) AS cnt FROM orders GROUP BY channel ORDER BY cnt DESC
+    for_term: null
+    label: 渠道分布（支撑规则 rule_exclude_test）
+
+# ---------- Ontology ↔ MDL 映射 ----------
+mappings:
+  - {id: map_term_qty,         mapping_type: term_metric,        ont_id: term_qty,         mdl_id: metric_qty}
+  - {id: map_term_net_sales,   mapping_type: term_metric,        ont_id: term_net_sales,   mdl_id: metric_net_sales}
+  - {id: map_term_gross_sales, mapping_type: term_metric,        ont_id: term_gross_sales, mdl_id: metric_gross_sales}
+  - {id: map_term_order_cnt,   mapping_type: term_metric,        ont_id: term_order_cnt,   mdl_id: metric_order_cnt}
+  - {id: map_term_aov,         mapping_type: term_metric,        ont_id: term_aov,         mdl_id: metric_aov}
+  # business_term 老客户 → SQL 谓词模板（{t_start} 由编译器代入查询时间起点）
+  - id: map_old_customer_rule
+    mapping_type: term_rule_sql
+    ont_id: term_old_customer
+    mdl_id: orders.customer_id IN (SELECT customer_id FROM orders WHERE status='completed' GROUP BY customer_id HAVING MIN(order_date) < date('{t_start}','-1 year'))
+    extra: {params: [t_start], note: 首单满一年即老客户}
+  - {id: map_attr_store_region, mapping_type: attr_dimension, ont_id: attr_store_region, mdl_id: dim_region}
+  - {id: map_ent_customer, mapping_type: entity_model, ont_id: ent_customer, mdl_id: mdl_customers}
+  - {id: map_ent_store,    mapping_type: entity_model, ont_id: ent_store,    mdl_id: mdl_stores}
+  - {id: map_ent_product,  mapping_type: entity_model, ont_id: ent_product,  mdl_id: mdl_order_items}
+  - {id: map_scope_qty,         mapping_type: term_dataset_scope, ont_id: term_qty,          mdl_id: ds_sales}
+  - {id: map_scope_net_sales,   mapping_type: term_dataset_scope, ont_id: term_net_sales,    mdl_id: ds_sales}
+  - {id: map_scope_gross_sales, mapping_type: term_dataset_scope, ont_id: term_gross_sales,  mdl_id: ds_sales}
+  - {id: map_scope_order_cnt,   mapping_type: term_dataset_scope, ont_id: term_order_cnt,    mdl_id: ds_sales}
+  - {id: map_scope_aov,         mapping_type: term_dataset_scope, ont_id: term_aov,          mdl_id: ds_sales}
+  - {id: map_scope_old_customer,mapping_type: term_dataset_scope, ont_id: term_old_customer, mdl_id: ds_sales}
+
+# ---------- 外部业务事件（归因 Step4 关联用，不随语义版本） ----------
+business_events:
+  - id: evt_mayday_2024
+    event_name: 五一促销主会场活动
+    event_type: campaign
+    start_date: '2024-05-01'
+    end_date: '2024-05-07'
+    related_dimension: dim_region
+    related_value: HD
+    impact_note: 华东区为五一促销主会场，预计拉动 5 月上旬销量
+  - id: evt_hd_logistics_202404
+    event_name: 华东物流线路检修
+    event_type: system_issue
+    start_date: '2024-04-10'
+    end_date: '2024-04-12'
+    related_dimension: dim_region
+    related_value: HD
+    impact_note: 华东区仓配线路检修 3 天，可能影响 4 月中旬发货与成交
+
+# ---------- 角色 / 用户 / 策略（密码仅演示用） ----------
+roles:
+  - {id: role_admin,          code: admin,          name: 系统管理员,   description: 全部权限}
+  - {id: role_semantic_admin, code: semantic_admin, name: 语义管理员,   description: 语义层/Ontology 管理后台}
+  - {id: role_analyst,        code: analyst,        name: 数据分析师,   description: 查数+归因+反馈，全量数据}
+  - {id: role_viewer,         code: viewer,         name: 查看者,       description: 仅查看分享结果}
+  - {id: role_region_east,    code: region_east,    name: 华东区角色,   description: 自定义角色：仅华东大区数据（行级策略载体）}
+
+users:
+  - {id: usr_admin,    username: admin,    display_name: 系统管理员, dept: 信息部, password: 'Init@123456'}
+  - {id: usr_analyst,  username: analyst,  display_name: 数据分析师, dept: 数据部, password: 'Init@123456'}
+  - {id: usr_east_mgr, username: east_mgr, display_name: 华东区经理, dept: 销售部, password: 'Init@123456'}
+  - {id: usr_viewer1,  username: viewer1,  display_name: 查看者一号, dept: 总经办, password: 'Init@123456'}
+
+user_roles:
+  - {user_id: usr_admin,    role_id: role_admin}
+  - {user_id: usr_analyst,  role_id: role_analyst}
+  - {user_id: usr_east_mgr, role_id: role_analyst}
+  - {user_id: usr_east_mgr, role_id: role_region_east}
+  - {user_id: usr_viewer1,  role_id: role_viewer}
+
+policies:
+  # 表级：analyst / viewer / 华东角色均可访问销售域数据集
+  - {id: pol_ds_analyst, role_id: role_analyst,     policy_type: dataset, dataset_id: ds_sales}
+  - {id: pol_ds_viewer,  role_id: role_viewer,      policy_type: dataset, dataset_id: ds_sales}
+  - {id: pol_ds_east,    role_id: role_region_east, policy_type: dataset, dataset_id: ds_sales}
+  # 行级：华东角色仅能看 dim_region ∈ {HD}
+  - id: pol_row_east_region
+    role_id: role_region_east
+    policy_type: row
+    model_id: mdl_stores
+    dimension_id: dim_region
+    allowed_values: [HD]
+
+# ---------- 手工补充词条（业务高频词） ----------
+dict_entries:
+  - {id: de_mayday,   word: 五一促销,   nature: _custom, freq: 30000}
+  - {id: de_campaign, word: 大促,       nature: _custom, freq: 20000}
+  - {id: de_mom,      word: 环比,       nature: _custom, freq: 20000}
+  - {id: de_yoy,      word: 同比,       nature: _custom, freq: 20000}
+
+# ---------- NL→SemQL 种子问答对（few-shot 记忆） ----------
+exemplars:
+  - id: ex_region_net_sales
+    dataset_id: ds_sales
+    nl_question: 上个月各大区的净销售额
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: [metric_net_sales]
+      dimensions: [dim_region]
+      time: {field: orders.order_date, range: last_month, grain: null}
+      filters: []
+      order_by: [{metric: metric_net_sales, direction: desc}]
+      limit: 100
+      compare: null
+      query_mode: aggregate
+    source: seed
+  - id: ex_product_qty
+    dataset_id: ds_sales
+    nl_question: 2024年4月各产品线的销量
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: [metric_qty]
+      dimensions: [dim_product_line]
+      time: {field: orders.order_date, range: 2024-04-01/2024-04-30, grain: null}
+      filters: []
+      order_by: [{metric: metric_qty, direction: desc}]
+      limit: 100
+      compare: null
+      query_mode: aggregate
+    source: seed
+  - id: ex_month_trend
+    dataset_id: ds_sales
+    nl_question: 2024年3月到5月每月的净销售额
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: [metric_net_sales]
+      dimensions: []
+      time: {field: orders.order_date, range: 2024-03-01/2024-05-31, grain: month}
+      filters: []
+      order_by: []
+      limit: 100
+      compare: null
+      query_mode: aggregate
+    source: seed
+  - id: ex_top_store
+    dataset_id: ds_sales
+    nl_question: 2024年4月销量最高的前5个门店
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: [metric_qty]
+      dimensions: [dim_store]
+      time: {field: orders.order_date, range: 2024-04-01/2024-04-30, grain: null}
+      filters: []
+      order_by: [{metric: metric_qty, direction: desc}]
+      limit: 5
+      compare: null
+      query_mode: aggregate
+    source: seed
+  - id: ex_detail_orders
+    dataset_id: ds_sales
+    nl_question: 列出2024年4月华东的10条订单明细
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: []
+      dimensions: [col_orders_order_id, col_orders_order_date, col_stores_store_name, col_orders_channel, col_orders_status]
+      time: {field: orders.order_date, range: 2024-04-01/2024-04-30, grain: null}
+      filters: [{dimension: dim_region, op: in, values: [HD]}]
+      order_by: []
+      limit: 10
+      compare: null
+      query_mode: detail
+    source: seed
+  - id: ex_channel_order_cnt
+    dataset_id: ds_sales
+    nl_question: 2024年4月各渠道的有效订单数
+    semql_json:
+      semql_version: '1.0'
+      dataset: ds_sales
+      metrics: [metric_order_cnt]
+      dimensions: [dim_channel]
+      time: {field: orders.order_date, range: 2024-04-01/2024-04-30, grain: null}
+      filters: []
+      order_by: [{metric: metric_order_cnt, direction: desc}]
+      limit: 100
+      compare: null
+      query_mode: aggregate
+    source: seed

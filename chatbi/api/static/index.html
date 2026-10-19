@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InsightChat · 对话式 BI</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC","Microsoft YaHei",sans-serif; background:#f3f5f7; height:100vh; overflow:hidden; }
+  #login-view { max-width:360px; margin:12vh auto; background:#fff; border-radius:12px; padding:32px; box-shadow:0 4px 24px rgba(0,0,0,.08); }
+  #login-view h1 { font-size:20px; margin-bottom:4px; }
+  #login-view .sub { color:#888; font-size:12px; margin-bottom:20px; }
+  input,button { font-size:14px; }
+  #login-view input { width:100%; padding:10px 12px; margin-bottom:12px; border:1px solid #ddd; border-radius:8px; }
+  #login-view button { width:100%; padding:10px; background:#1677ff; color:#fff; border:none; border-radius:8px; cursor:pointer; }
+  #login-err { color:#f5222d; font-size:12px; margin-top:8px; min-height:16px; }
+  #main-view { display:none; height:100vh; flex-direction:column; }
+  header { background:#001529; color:#fff; padding:0 16px; height:48px; display:flex; align-items:center; justify-content:space-between; }
+  header .brand { font-weight:600; }
+  header .who { font-size:12px; color:#aaa; }
+  #body { flex:1; display:flex; min-height:0; }
+  #sessions { width:200px; background:#fff; border-right:1px solid #e8e8e8; overflow-y:auto; padding:8px; }
+  #sessions .sitem { padding:8px 10px; border-radius:6px; font-size:13px; cursor:pointer; margin-bottom:4px; color:#333; }
+  #sessions .sitem:hover { background:#f0f5ff; }
+  #sessions .sitem.active { background:#e6f4ff; color:#1677ff; }
+  #new-session { width:100%; margin-bottom:8px; padding:6px; border:1px dashed #1677ff; color:#1677ff; background:#fff; border-radius:6px; cursor:pointer; }
+  #chat { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #messages { flex:1; overflow-y:auto; padding:16px; }
+  .msg { margin-bottom:14px; display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { max-width:78%; padding:10px 14px; border-radius:10px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.06); font-size:14px; line-height:1.6; }
+  .msg.user .bubble { background:#1677ff; color:#fff; }
+  .bubble .summary { white-space:pre-wrap; }
+  .bubble table { border-collapse:collapse; margin-top:8px; font-size:12px; width:100%; }
+  .bubble th,.bubble td { border:1px solid #eee; padding:4px 8px; text-align:right; }
+  .bubble th { background:#fafafa; }
+  .bubble td:first-child,.bubble th:first-child { text-align:left; }
+  .chart-box { width:100%; height:280px; margin-top:8px; }
+  .tag { display:inline-block; background:#f0f5ff; color:#1677ff; border-radius:4px; font-size:11px; padding:1px 6px; margin:2px 2px 0 0; }
+  .warn { background:#fffbe6; border:1px solid #ffe58f; color:#ad6800; border-radius:6px; padding:6px 10px; font-size:12px; margin-top:6px; }
+  .rules { font-size:11px; color:#8c8c8c; margin-top:6px; }
+  .clarify-opts button { display:block; width:100%; text-align:left; margin-top:6px; padding:8px 10px; border:1px solid #d9d9d9; border-radius:8px; background:#fff; cursor:pointer; font-size:13px; }
+  .clarify-opts button:hover { border-color:#1677ff; color:#1677ff; }
+  .feedback { margin-top:6px; font-size:12px; color:#999; }
+  .feedback button { border:none; background:none; cursor:pointer; font-size:14px; }
+  #inputbar { padding:10px 16px; background:#fff; border-top:1px solid #e8e8e8; display:flex; gap:8px; }
+  #inputbar input { flex:1; padding:10px 12px; border:1px solid #d9d9d9; border-radius:8px; }
+  #inputbar button { padding:0 20px; background:#1677ff; color:#fff; border:none; border-radius:8px; cursor:pointer; }
+  #debug { width:320px; background:#fff; border-left:1px solid #e8e8e8; overflow-y:auto; padding:10px; font-size:12px; }
+  #debug h3 { font-size:13px; margin:10px 0 4px; color:#1677ff; }
+  #debug pre { background:#f6f8fa; border-radius:6px; padding:8px; white-space:pre-wrap; word-break:break-all; font-size:11px; }
+  .thinking { color:#999; font-style:italic; }
+  .evt-log { color:#bbb; font-size:11px; }
+</style>
+</head>
+<body>
+<div id="login-view">
+  <h1>InsightChat</h1>
+  <div class="sub">企业级对话式 BI · 本地演示</div>
+  <input id="u" value="analyst" placeholder="用户名">
+  <input id="p" type="password" value="Init@123456" placeholder="密码">
+  <button onclick="doLogin()">登录</button>
+  <div id="login-err"></div>
+</div>
+
+<div id="main-view">
+  <header>
+    <span class="brand">InsightChat 对话式 BI</span>
+    <span class="who" id="who"></span>
+  </header>
+  <div id="body">
+    <div id="sessions">
+      <button id="new-session" onclick="newSession()">＋ 新会话</button>
+      <div id="slist"></div>
+    </div>
+    <div id="chat">
+      <div id="messages"></div>
+      <div id="inputbar">
+        <input id="q" placeholder="输入问题，如：2024年4月各大区的净销售额" onkeydown="if(event.key==='Enter')doAsk()">
+        <button onclick="doAsk()">发送</button>
+      </div>
+    </div>
+    <div id="debug"><h3>调试面板</h3><div id="dbg">（提问后显示意图/匹配/SQL/版本）</div></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/v1';
+let token = localStorage.getItem('ic_token') || '';
+let me = JSON.parse(localStorage.getItem('ic_user') || 'null');
+let sessionId = null;
+const echartsOK = () => typeof echarts !== 'undefined';
+
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(v){ if(v==null) return '-'; if(typeof v==='number') return Number.isInteger(v)? v.toLocaleString() : v.toLocaleString(undefined,{maximumFractionDigits:2}); return esc(v); }
+
+async function api(path, opts={}, raw=false){
+  opts.headers = Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+token}, opts.headers||{});
+  const r = await fetch(API+path, opts);
+  if(raw) return r;
+  const j = await r.json();
+  if(j.code !== 0) throw new Error(j.message || ('错误 '+j.code));
+  return j.data;
+}
+
+async function doLogin(){
+  try {
+    const d = await api('/auth/login', {method:'POST', body: JSON.stringify({username:document.getElementById('u').value, password:document.getElementById('p').value})});
+    token = d.token; me = d.user;
+    localStorage.setItem('ic_token', token); localStorage.setItem('ic_user', JSON.stringify(me));
+    enterMain();
+  } catch(e){ document.getElementById('login-err').textContent = e.message; }
+}
+
+function enterMain(){
+  document.getElementById('login-view').style.display='none';
+  document.getElementById('main-view').style.display='flex';
+  document.getElementById('who').textContent = me.display_name + '（' + (me.roles||[]).join('/') + '）';
+  loadSessions();
+}
+
+async function loadSessions(){
+  const d = await api('/history/sessions?limit=30');
+  const el = document.getElementById('slist');
+  el.innerHTML = '';
+  (d.items||[]).forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'sitem' + (s.id===sessionId?' active':'');
+    div.textContent = (s.title||'会话').slice(0,20);
+    div.onclick = ()=>{ sessionId=s.id; loadSessions(); };
+    el.appendChild(div);
+  });
+}
+function newSession(){ sessionId=null; document.getElementById('messages').innerHTML=''; loadSessions(); }
+
+function addMsg(role, html){
+  const wrap = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + (role==='user'?'user':'');
+  div.innerHTML = '<div class="bubble">'+html+'</div>';
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  return div.firstChild;
+}
+
+function dbg(intent, result){
+  let h = '';
+  if(intent){ h += '<h3>意图</h3><pre>'+esc(JSON.stringify(intent,null,1))+'</pre>'; }
+  if(result){
+    if(result.match_explain) h += '<h3>匹配解释</h3><pre>'+esc(result.match_explain.join('\n'))+'</pre>';
+    if(result.sql) h += '<h3>SQL</h3><pre>'+esc(result.sql)+'</pre>';
+    if(result.semql) h += '<h3>SemQL</h3><pre>'+esc(JSON.stringify(result.semql,null,1))+'</pre>';
+    if(result.applied_rules && result.applied_rules.length) h += '<h3>已应用规则</h3><pre>'+esc(result.applied_rules.join('\n'))+'</pre>';
+    h += '<h3>语义版本</h3><pre>v'+esc(result.semantic_version ?? '-')+'</pre>';
+  }
+  document.getElementById('dbg').innerHTML = h || '（无）';
+}
+
+function renderTable(cols, rows){
+  let h = '<table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>';
+  rows.forEach(r=>{ h += '<tr>'+r.map(v=>'<td>'+fmt(v)+'</td>').join('')+'</tr>'; });
+  return h+'</tbody></table>';
+}
+
+function renderChart(container, chart, cols, rows, colsMeta){
+  const t = chart && chart.type;
+  if(!echartsOK() || !t || t==='table' || t==='pivot_table' || t==='top10_bar_horizontal' && !echartsOK()){
+    container.innerHTML = renderTable(cols, rows); return;
+  }
+  const box = document.createElement('div'); box.className='chart-box';
+  container.appendChild(box);
+  const ch = echarts.init(box);
+  const dimIdx = (colsMeta||[]).findIndex(c=>c.role==='dimension');
+  const timeIdx = (colsMeta||[]).findIndex(c=>c.role==='time');
+  const metIdx = (colsMeta||[]).findIndex(c=>c.role==='metric');
+  const catIdx = dimIdx>=0?dimIdx:(timeIdx>=0?timeIdx:0);
+  const valIdx = metIdx>=0?metIdx:cols.length-1;
+  try {
+    if(t==='metric_card'){
+      container.innerHTML = '<div style="text-align:center;padding:24px"><div style="font-size:32px;font-weight:600;color:#1677ff">'+fmt(rows[0][valIdx])+'</div><div style="color:#888">'+esc(cols[valIdx])+'</div></div>';
+      ch.dispose(); return;
+    }
+    if(t==='bar'||t==='bar_horizontal'){
+      const cats = rows.map(r=>String(r[catIdx])), vals = rows.map(r=>r[valIdx]);
+      const opt = t==='bar'
+        ? {xAxis:{type:'category',data:cats},yAxis:{type:'value'},series:[{type:'bar',data:vals}]}
+        : {xAxis:{type:'value'},yAxis:{type:'category',data:cats},series:[{type:'bar',data:vals}]};
+      opt.grid={containLabel:true}; opt.tooltip={};
+      ch.setOption(opt); return;
+    }
+    if(t==='line'){
+      ch.setOption({xAxis:{type:'category',data:rows.map(r=>String(r[catIdx]))},yAxis:{type:'value'},series:[{type:'line',data:rows.map(r=>r[valIdx]),smooth:true}],grid:{containLabel:true},tooltip:{trigger:'axis'}}); return;
+    }
+    if(t==='multi_line'){
+      const times=[...new Set(rows.map(r=>String(r[timeIdx>=0?timeIdx:0])))].sort();
+      const cats=[...new Set(rows.map(r=>String(r[dimIdx>=0?dimIdx:1])))];
+      const series=cats.map(c=>({name:c,type:'line',smooth:true,data:times.map(tm=>{const row=rows.find(r=>String(r[timeIdx>=0?timeIdx:0])===tm&&String(r[dimIdx>=0?dimIdx:1])===c);return row?row[valIdx]:null;})}));
+      ch.setOption({xAxis:{type:'category',data:times},yAxis:{type:'value'},series,legend:{},grid:{containLabel:true},tooltip:{trigger:'axis'}}); return;
+    }
+    if(t==='pie'){
+      ch.setOption({series:[{type:'pie',radius:'60%',data:rows.map(r=>({name:String(r[catIdx]),value:r[valIdx]})),label:{formatter:'{b}: {d}%'}}],tooltip:{}}); return;
+    }
+    if(t==='waterfall'){
+      const labels=rows.map(r=>r[0]), vals=rows.map(r=>r[1]), types=rows.map(r=>r[2]);
+      let run=0; const base=[],delta=[];
+      vals.forEach((v,i)=>{ if(types[i]==='base'){base.push(0);delta.push(v);run=v;} else if(types[i]==='total'){base.push(0);delta.push(v);} else { if(v>=0){base.push(run);delta.push(v);run+=v;} else {base.push(run+v);delta.push(-v);run+=v;} } });
+      ch.setOption({xAxis:{type:'category',data:labels},yAxis:{type:'value'},series:[{type:'bar',stack:'w',itemStyle:{color:'transparent'},data:base},{type:'bar',stack:'w',data:delta,itemStyle:{color:'#1677ff'}}],grid:{containLabel:true},tooltip:{}}); return;
+    }
+    container.innerHTML = renderTable(cols, rows);
+  } catch(e){ container.innerHTML = renderTable(cols, rows); }
+}
+
+async function doAsk(){
+  const q = document.getElementById('q').value.trim();
+  if(!q) return;
+  document.getElementById('q').value='';
+  addMsg('user', esc(q));
+  const bubble = addMsg('assistant', '<span class="thinking">正在理解您的问题…</span>');
+  let chartBox = null;
+  try {
+    await ssePost('/chat/ask', {question:q, session_id:sessionId}, (evt, data) => {
+      if(evt==='intent'){ sessionId = data.session_id || sessionId; bubble.innerHTML = '<span class="evt-log">意图：'+esc(data.intent)+'</span>'; dbg(data, null); }
+      else if(evt==='progress'){ bubble.innerHTML = '<span class="evt-log">' + esc(data.note || data.stage) + '</span>'; }
+      else if(evt==='clarify'){ renderClarify(bubble, data); }
+      else if(evt==='result'){ renderResult(bubble, data); dbg(null, data); loadSessions(); }
+      else if(evt==='error'){ bubble.innerHTML = '<span style="color:#f5222d">'+esc(data.message||'出错啦')+'</span>'; }
+    });
+  } catch(e){ bubble.innerHTML = '<span style="color:#f5222d">'+esc(e.message)+'</span>'; }
+}
+
+function renderClarify(bubble, card){
+  let h = '<div>'+esc(card.prompt)+'</div><div class="clarify-opts">';
+  card.options.forEach(o => { h += '<button data-key="'+esc(o.key)+'">'+esc(o.label)+'</button>'; });
+  h += '</div>';
+  bubble.innerHTML = h;
+  bubble.querySelectorAll('button').forEach(btn => {
+    btn.onclick = async () => {
+      const nb = addMsg('assistant', '<span class="thinking">继续查询…</span>');
+      await ssePost('/chat/clarify', {clarify_id: card.clarify_id, selected_key: btn.dataset.key}, (evt,data)=>{
+        if(evt==='progress') nb.innerHTML = '<span class="evt-log">'+esc(data.note||data.stage)+'</span>';
+        else if(evt==='result'){ renderResult(nb, data); dbg(null, data); }
+        else if(evt==='error') nb.innerHTML = '<span style="color:#f5222d">'+esc(data.message)+'</span>';
+      });
+    };
+  });
+}
+
+function renderResult(bubble, d){
+  let h = '';
+  (d.assumptions||[]).forEach(a => { h += '<div class="warn">'+esc(a)+'</div>'; });
+  if(d.answer_type==='insight'){
+    h += '<div class="summary">'+esc(d.narrative||d.summary||'')+'</div>';
+    const r = d.report||{};
+    if(r.waterfall && r.waterfall.length){ h += '<div class="chart-host"></div>'; }
+    if(r.events && r.events.length){
+      h += '<div style="margin-top:6px;font-size:12px;color:#888">时间重合事件：' + r.events.map(e=>esc(e.name)+'（'+esc(e.start_date)+'~'+esc(e.end_date)+'）').join('；') + '</div>';
+    }
+  } else if(d.answer_type==='data'){
+    if(d.summary) h += '<div class="summary">'+esc(d.summary)+'</div>';
+    h += '<div class="chart-host"></div>';
+    (d.match_explain||[]).forEach(x => { h += '<span class="tag">'+esc(x)+'</span>'; });
+    if(d.applied_rules && d.applied_rules.length) h += '<div class="rules">'+d.applied_rules.map(esc).join('<br>')+'</div>';
+    h += '<div class="feedback">反馈：<button data-v="up">👍</button><button data-v="down">👎</button></div>';
+  } else {
+    h += '<div class="summary">'+esc(d.summary||'')+'</div>';
+  }
+  bubble.innerHTML = h;
+  const host = bubble.querySelector('.chart-host');
+  if(host){
+    if(d.answer_type==='insight'){ const wf=d.report.waterfall.map(x=>[x.label,x.value,x.type]); renderChart(host, {type:'waterfall'}, ['label','value','type'], wf, null); }
+    else renderChart(host, d.chart, d.columns, d.rows, d.columns_meta);
+  }
+  const fb = bubble.querySelector('.feedback');
+  if(fb && d.answer_id){ fb.querySelectorAll('button').forEach(b => b.onclick = async () => {
+    try{ await api('/feedback',{method:'POST',body:JSON.stringify({answer_id:d.answer_id, vote:b.dataset.v, reason_tag: b.dataset.v==='down'?'other':null})}); fb.innerHTML='<span style="color:#52c41a">已收到，感谢反馈</span>'; }catch(e){ fb.innerHTML='<span style="color:#f5222d">'+esc(e.message)+'</span>'; }
+  }); }
+}
+
+async function ssePost(path, body, onEvent){
+  const r = await api(path, {method:'POST', body: JSON.stringify(body)}, true);
+  if(!r.ok){ const j = await r.json().catch(()=>null); throw new Error(j?.message || ('HTTP '+r.status)); }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder('utf-8');
+  let buf = '';
+  while(true){
+    const {done, value} = await reader.read();
+    if(value){ buf += dec.decode(value, {stream:true}); buf = buf.replace(/\r\n/g, '\n'); }
+    let idx;
+    while((idx = buf.indexOf('\n\n')) >= 0){
+      const chunk = buf.slice(0, idx); buf = buf.slice(idx+2);
+      let evt='message', data='';
+      chunk.split('\n').forEach(line=>{
+        if(line.startsWith('event:')) evt=line.slice(6).trim();
+        else if(line.startsWith('data:')) data+=line.slice(5).trim();
+      });
+      if(data){ try{ onEvent(evt, JSON.parse(data)); }catch(e){ onEvent(evt, {message:data}); } }
+    }
+    if(done){
+      buf = buf.trim();
+      if(buf){
+        let evt='message', data='';
+        buf.split('\n').forEach(line=>{
+          if(line.startsWith('event:')) evt=line.slice(6).trim();
+          else if(line.startsWith('data:')) data+=line.slice(5).trim();
+        });
+        if(data){ try{ onEvent(evt, JSON.parse(data)); }catch(e){ onEvent(evt, {message:data}); } }
+      }
+      break;
+    }
+  }
+}
+
+if(token && me){ enterMain(); }
+</script>
+</body>
+</html>

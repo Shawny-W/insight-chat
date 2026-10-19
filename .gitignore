@@ -1,0 +1,45 @@
+# ===== 机密 =====
+.env
+*.pem
+*.key
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 项目运行产物 =====
+data/*.db
+data/*.db-journal
+test_data/output/
+logs/
+*.log
+
+# ===== IDE / 系统 =====
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ===== 其他 =====
+*.bak
+tmp/
+
+# ===== docs =====
+docs/RUNBOOK.md
+docs/ChatBI_PRD.md

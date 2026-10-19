@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatbi"
+version = "0.1.0"
+description = "InsightChat 企业级 ChatBI（NL2SQL + 洞察归因）本地可运行版"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "openai",
+    "sqlglot",
+    "jieba",
+    "pydantic",
+    "httpx",
+    "pytest",
+    "python-dotenv",
+    "sse-starlette",
+    "PyYAML",
+]
+
+[tool.setuptools.packages.find]
+include = ["chatbi*"]
+
+[tool.setuptools.package-data]
+"chatbi.semantic" = ["seed/*.yaml"]

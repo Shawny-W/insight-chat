@@ -1,0 +1,12 @@
+# 本项目真实依赖（pip freeze 后手工清理，仅保留实际 import 的包）
+fastapi==0.142.2
+uvicorn==0.54.0
+openai==3.22.1
+sqlglot==30.21.0
+jieba==0.42.1
+pydantic==2.13.5
+httpx==0.28.1
+python-dotenv==1.2.4
+sse-starlette==3.5.0
+pytest==9.1.1
+PyYAML==6.0.3
