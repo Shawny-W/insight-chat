@@ -54,6 +54,11 @@ BIZ_DB_PATH: Path = _abs(os.environ.get("BIZ_DB_PATH", "./test_data/data/retail.
 AUTH_SECRET: str = os.environ.get("AUTH_SECRET", "change-me").strip()
 TZ_NAME: str = os.environ.get("TZ_NAME", "Asia/Shanghai").strip()
 
+# --- 洞察显著性阈值（PRD 6.6.4 Step1 的可调参数） ---
+# 显著判定：|环比%| >= INSIGHT_SIGNIFICANT_PCT 或 |环比% - 历史均值| >= INSIGHT_SIGMA_K * σ
+INSIGHT_SIGNIFICANT_PCT: float = float(os.environ.get("INSIGHT_SIGNIFICANT_PCT", "5"))
+INSIGHT_SIGMA_K: float = float(os.environ.get("INSIGHT_SIGMA_K", "2"))
+
 # --- 派生目录 ---
 DATA_DIR: Path = META_DB_PATH.parent                     # ./data
 DICT_DIR: Path = DATA_DIR / "dict"                       # jieba 自定义词典目录

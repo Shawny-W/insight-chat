@@ -124,7 +124,7 @@ def classify(question: str, ctx: list[dict], snapshot: SemanticSnapshot) -> Inte
 # query/executor.py —— execute(sql, timeout=30, max_rows=10000) -> ResultSet(columns, rows, row_count, truncated)
 
 # insight/fluctuation.py —— detect(metric_id, period_a, period_b, snapshot, policies) -> {V_A,V_B,delta,pct,baseline_series[<=12],mu,sigma,is_significant}
-#   显著: |pct|>=10% or |pct-mu|>=2*sigma
+#   显著: |pct|>=INSIGHT_SIGNIFICANT_PCT(.env可调,默认5) or |pct-mu|>=INSIGHT_SIGMA_K*sigma(默认2)；基线<6期只用百分比规则
 # insight/attribution.py —— attribute(metric_id, period_a, period_b, base_filters, policies) -> AttributionResult
 #   coverage(D)=sum(|contrib| top3)/|delta|; 选解释力最高维度; top维值占比>=20%继续下钻, 至多3层; z_score校验低基数; 关联business_event
 # insight/narrative.py —— narrate(attribution_json) -> str (heavy模型, 失败用模板拼接)

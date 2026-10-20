@@ -2,7 +2,9 @@
 
 detect(metric_id, period_a, period_b, snapshot, policies)
   -> {V_A, V_B, delta, pct, baseline_series[<=12], mu, sigma, is_significant, baseline_limited}
-显著判定（PRD 6.6.4 Step1）：|pct|>=10% 或 |pct-mu|>=2*sigma；基线不足 6 期只用 10% 规则。
+显著判定（PRD 6.6.4 Step1，阈值经 config 可调）：
+  |pct| >= INSIGHT_SIGNIFICANT_PCT（默认 5%）或 |pct-mu| >= INSIGHT_SIGMA_K*sigma（默认 2σ）；
+  基线不足 6 期只用百分比规则。
 指标取值复用查询链路：SemQL 构造 → compile → gateway → execute。
 """
 
@@ -11,6 +13,7 @@ import re
 import statistics
 from datetime import date
 
+from chatbi.config import INSIGHT_SIGNIFICANT_PCT, INSIGHT_SIGMA_K
 from chatbi.query.compiler import compile as compile_semql
 from chatbi.query.executor import execute
 from chatbi.query.gateway import check_and_rewrite
@@ -118,9 +121,10 @@ def detect(metric_id: str, period_a, period_b, snapshot: SemanticSnapshot,
     if pct is None:
         is_significant = False
     elif baseline_limited:
-        is_significant = abs(pct) >= 10.0
+        is_significant = abs(pct) >= INSIGHT_SIGNIFICANT_PCT
     else:
-        is_significant = abs(pct) >= 10.0 or abs(pct - mu) >= 2 * sigma
+        is_significant = (abs(pct) >= INSIGHT_SIGNIFICANT_PCT
+                          or abs(pct - mu) >= INSIGHT_SIGMA_K * sigma)
 
     return {
         "metric_id": metric_id,

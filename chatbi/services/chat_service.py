@@ -11,6 +11,7 @@ import uuid
 from typing import Iterator
 
 from chatbi.chart.rules import choose
+from chatbi.config import INSIGHT_SIGNIFICANT_PCT, INSIGHT_SIGMA_K
 from chatbi.db import get_meta_conn
 from chatbi.insight.attribution import AttributionError, attribute
 from chatbi.insight.fluctuation import detect
@@ -421,7 +422,8 @@ def _run_insight(user: dict, session_id: str, question: str, intent: IntentResul
                     f"判定为异常。")
         else:
             text = (f"{metric_name} 处于正常波动区间（环比 {fluc['pct']}%，"
-                    f"历史均值 {fluc['mu']}%±2σ）。")
+                    f"历史均值 {fluc['mu']}%±{INSIGHT_SIGMA_K:g}σ，"
+                    f"显著阈值 ±{INSIGHT_SIGNIFICANT_PCT:g}%）。")
         yield _ev("result", {
             "answer_type": "anomaly", "question": question,
             "is_significant": fluc["is_significant"], "fluctuation": fluc,
@@ -435,7 +437,8 @@ def _run_insight(user: dict, session_id: str, question: str, intent: IntentResul
             "answer_type": "insight", "question": question,
             "is_significant": False, "fluctuation": fluc,
             "summary": f"{metric_name} {fluc['period_a'].split('/')[0][:7]} "
-                       f"较基期变化 {fluc['pct']}%，处于正常波动区间（±2σ内），无需归因。",
+                       f"较基期变化 {fluc['pct']}%，未达显著阈值"
+                       f"（|环比|≥{INSIGHT_SIGNIFICANT_PCT:g}% 或偏离历史均值 {INSIGHT_SIGMA_K:g}σ），无需归因。",
             "assumptions": assumptions, "semantic_version": snapshot.version,
         })
         return
