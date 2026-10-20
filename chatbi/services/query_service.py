@@ -74,9 +74,16 @@ def _post_fix_semql(semql: SemQL, link_result: LinkResult,
     if time_range:
         field = semql.time.field if semql.time else None
         llm_grain = semql.time.grain if semql.time else None
-        semql.time = TimeSpec(field=field,
-                              range=f"{time_range['start']}/{time_range['end']}",
-                              grain=llm_grain or grain)
+        llm_range = semql.time.range if semql.time else None
+        # compare 语义下 time.range 只应是「当前期」；而 intent 的 time_range 会把
+        # 问题里提到的基期也合并进来（如「5月是否比4月低」→ 4/1~5/31），直接覆盖
+        # 会把当前期扩成两个月份，导致对比两期都错。故 compare 查询保留 LLM 已划分
+        # 好的当前期范围（仅当 LLM 没给范围时才回退 intent 范围）。
+        if semql.compare is not None and llm_range:
+            rng = llm_range
+        else:
+            rng = f"{time_range['start']}/{time_range['end']}"
+        semql.time = TimeSpec(field=field, range=rng, grain=llm_grain or grain)
     # 口径强制：命中的 metric_term 只绑定一个指标时，SemQL 主指标必须采用它。
     # 澄清场景下 link_result 已按用户选择过滤，此处保证用户确认的口径不被
     # LLM（受示例问答对影响）改写成另一指标。
