@@ -77,6 +77,23 @@ def _post_fix_semql(semql: SemQL, link_result: LinkResult,
         semql.time = TimeSpec(field=field,
                               range=f"{time_range['start']}/{time_range['end']}",
                               grain=llm_grain or grain)
+    # 口径强制：命中的 metric_term 只绑定一个指标时，SemQL 主指标必须采用它。
+    # 澄清场景下 link_result 已按用户选择过滤，此处保证用户确认的口径不被
+    # LLM（受示例问答对影响）改写成另一指标。
+    bound: list[str] = []
+    for m in link_result.matched_elements:
+        if m["element_type"] != "term":
+            continue
+        t = snapshot.terms.get(m["element_id"])
+        if t and t.get("term_type") == "metric_term":
+            mt = snapshot.metric_of_term(m["element_id"])
+            if mt and mt["id"] not in bound:
+                bound.append(mt["id"])
+    if len(bound) == 1 and semql.metrics and bound[0] not in semql.metrics:
+        if len(semql.metrics) == 1:
+            semql.metrics = [bound[0]]  # LLM 改写了唯一主指标 → 纠正为确认口径
+        else:
+            semql.metrics = [bound[0]] + semql.metrics  # 多指标输出 → 确认口径置首
     for m in link_result.matched_elements:
         if m["element_type"] != "term":
             continue
@@ -115,20 +132,23 @@ def run_query(question: str, user_id: str = "usr_analyst", *,
               time_range: dict | None = None, grain: str | None = None,
               ctx_turns: list[dict] | None = None,
               session_id: str | None = None,
-              snapshot: SemanticSnapshot | None = None) -> dict:
-    """查询主链路；失败时落 query_log 后原样上抛异常。"""
+              snapshot: SemanticSnapshot | None = None,
+              link_result: LinkResult | None = None) -> dict:
+    """查询主链路；失败时落 query_log 后原样上抛异常。
+
+    link_result：澄清续走时由 chat 层传入（已按用户选择过滤），为 None 时内部重新 link。"""
     t0 = time.monotonic()
     conn = get_meta_conn()
     snapshot = snapshot or load_snapshot(conn)
     policies = load_policies(conn, user_id)
-    link_result: LinkResult | None = None
     semql: SemQL | None = None
     final_sql = None
     retry_count = 0
 
     try:
-        # 1. schema linking
-        link_result = link(question, mentions or [], snapshot)
+        # 1. schema linking（澄清续走时复用 chat 层过滤后的结果，保证用户选择生效）
+        if link_result is None:
+            link_result = link(question, mentions or [], snapshot)
 
         # 2. SemQL 生成（三级重试链在 generate 内）
         exemplars = pick_exemplars(conn, question, next(iter(snapshot.datasets)))

@@ -162,6 +162,22 @@ def clarify(user: dict, clarify_id: str, selected_key: str | None = None,
                     and m["mention"] == p["mention"]
                     and m["element_id"] != selected_key)
         ]
+        # 兜底：用户所选 term 若不在命中列表里（如仅来自 LLM 候选），补一条命中，
+        # 确保下游 prompt 注入该术语口径、LLM 按所选指标出 SemQL
+        if not any(m["element_type"] == "term" and m["element_id"] == selected_key
+                   for m in link_result.matched_elements):
+            link_result.matched_elements.append(
+                {"element_type": "term", "element_id": selected_key,
+                 "mention": p["mention"] or ""})
+    elif p["type"] == "VALUE_CONFLICT" and selected_key:
+        dim_id, _, tech = selected_key.partition("|")
+        link_result.matched_elements = [
+            m for m in link_result.matched_elements
+            if not (m["element_type"] == "dim_value"
+                    and m["mention"] == p["mention"]
+                    and not (m["element_id"] == dim_id
+                             and m.get("tech_value") == tech))
+        ]
     elif p["type"] == "TIME_MISSING" and selected_key:
         try:
             s, e = resolve_time_range(selected_key, today())
@@ -243,11 +259,14 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
     if ambiguities and clarify_round <= MAX_CLARIFY_ROUNDS:
         card = build_clarify(ambiguities, snapshot, round=clarify_round)
         if card is not None:
+            # 卡片取自「按优先级排序后的首个」歧义，mention 必须取同一个，
+            # 否则 clarify 合并时按错误的 mention 过滤会导致用户选择失效
+            chosen_amb = next((a for a in ambiguities if a["type"] == card.type), {})
             ctx["clarify_pending"] = {
                 "clarify_id": card.clarify_id, "question": rewritten, "intent": intent,
                 "link_result": link_result, "round": clarify_round,
                 "type": card.type,
-                "mention": ambiguities[0].get("mention"),
+                "mention": chosen_amb.get("mention"),
             }
             conn = get_meta_conn()
             try:
@@ -286,7 +305,10 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
         result = run_query(question, user_id=user["id"], mentions=intent.mentions,
                            time_range=time_range, grain=intent.grain,
                            ctx_turns=ctx.get("turns"), session_id=session_id,
-                           snapshot=snapshot)
+                           snapshot=snapshot,
+                           # 澄清续走：复用已按用户选择过滤的 link_result；
+                           # 否则传 None 由 run_query 内部重新 link（保持原有行为）
+                           link_result=link_result if clarified else None)
     except LLMGenerateFailedError as exc:
         yield _ev("error", {"code": "LLM_GENERATE_FAILED",
                             "message": "这个问题有点复杂，我暂时无法准确理解。"
