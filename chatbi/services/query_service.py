@@ -7,10 +7,11 @@ import json
 import sqlite3
 import time
 import uuid
+from datetime import date, timedelta
 
 from chatbi.db import get_meta_conn
 from chatbi.nlp.linking import LinkResult, link
-from chatbi.query.compiler import CompileError
+from chatbi.query.compiler import CompileError, _shift_months
 from chatbi.query.compiler import compile as compile_semql
 from chatbi.query.executor import ResultSet, execute
 from chatbi.query.gateway import SqlForbiddenError, check_and_rewrite_detail
@@ -65,6 +66,27 @@ def pick_exemplars(conn: sqlite3.Connection, question: str, dataset_id: str,
     return picked
 
 
+def _compare_extended_start(llm_range: str, grain: str, ctype: str) -> str | None:
+    """LAG 窗口形态下 range 必须覆盖基期桶，返回应延展到的起点；无需延展返回 None。
+
+    以「 range 终点所在的最后一个桶」为当前桶，对照 compiler 的 LAG 偏移
+    （mom=前1桶；yoy=month 前12桶 / week 前52桶 / day 前365桶）反推基期桶起点。
+    """
+    try:
+        s_s, e_s = llm_range.split("/")
+        rs, re_ = date.fromisoformat(s_s), date.fromisoformat(e_s)
+    except (ValueError, AttributeError):
+        return None
+    if grain == "month":
+        bucket = re_.replace(day=1)
+        need = _shift_months(bucket, -1 if ctype == "mom" else -12)
+    elif grain == "week":
+        need = re_ - timedelta(days=7 if ctype == "mom" else 364)
+    else:  # day
+        need = re_ - timedelta(days=1 if ctype == "mom" else 365)
+    return need.isoformat() if need < rs else None
+
+
 def _post_fix_semql(semql: SemQL, link_result: LinkResult,
                     snapshot: SemanticSnapshot,
                     time_range: dict | None, grain: str | None) -> None:
@@ -81,6 +103,12 @@ def _post_fix_semql(semql: SemQL, link_result: LinkResult,
         # 好的当前期范围（仅当 LLM 没给范围时才回退 intent 范围）。
         if semql.compare is not None and llm_range:
             rng = llm_range
+            # 但 LAG 窗口形态（有 grain + mom/yoy）的基期数据必须落在主时间范围内，
+            # 否则基期列为 NULL（前端表现为"查不到基期数据"）→ 按需向前延展起点。
+            if llm_grain and semql.compare.type in ("mom", "yoy"):
+                ext = _compare_extended_start(llm_range, llm_grain, semql.compare.type)
+                if ext:
+                    rng = f"{ext}/{llm_range.split('/')[1]}"
         else:
             rng = f"{time_range['start']}/{time_range['end']}"
         semql.time = TimeSpec(field=field, range=rng, grain=llm_grain or grain)
