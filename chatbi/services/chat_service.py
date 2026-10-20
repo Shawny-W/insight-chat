@@ -380,6 +380,17 @@ def _run_insight(user: dict, session_id: str, question: str, intent: IntentResul
     metric_id = _pick_metric(snapshot, link_result)
     period_a, period_b, assumptions = _parse_why_periods(question, intent)
     base_filters = [{"dimension": "dim_channel", "op": "not_in", "values": ["TEST"]}]
+    # 把问题中命中的维度值（如"华北区"→HB）并入基础过滤：
+    # 否则波动识别/归因按全公司口径计算，与同会话内按维度过滤的查询结果互相矛盾
+    dim_vals: dict[str, list] = {}
+    for m in link_result.matched_elements:
+        if m["element_type"] == "dim_value" and m.get("tech_value") is not None \
+                and m["element_id"] in snapshot.dimensions:
+            dim_vals.setdefault(m["element_id"], [])
+            if m["tech_value"] not in dim_vals[m["element_id"]]:
+                dim_vals[m["element_id"]].append(m["tech_value"])
+    for did, vals in dim_vals.items():
+        base_filters.append({"dimension": did, "op": "in", "values": vals})
 
     yield _ev("progress", {"stage": "executing", "note": "正在确认对比口径…"})
     try:
