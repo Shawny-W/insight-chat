@@ -1,6 +1,6 @@
-# InsightChat（企业级对话式 BI · 本地可运行版）
+# InsightChat（企业级对话式 BI）
 
-一句话：用户用中文自然语言提问，系统基于 **Ontology 本体 + 语义层（MDL）** 把问题翻译为可信 SQL 并从业务库取数，自动选图呈现；对"为什么"类问题提供**自动归因洞察**（波动识别 → 贡献度下钻 → 事件关联 → LLM 结论）。
+用户用自然语言提问，系统基于 **Ontology 本体 + 语义层（MDL）** 把问题翻译为可信 SQL 并从业务库取数，自动选图呈现；对"为什么"类问题提供**自动归因洞察**（波动识别 → 贡献度下钻 → 事件关联 → LLM 结论）。
 
 特性：
 
@@ -37,17 +37,17 @@ pip install -e .            # 或 pip install -r requirements.txt
 
 对照 `.env.example` 逐项填写（**DeepSeek Key 等机密只放 .env，严禁提交 git / 打印日志**）：
 
-| 键 | 说明 |
-|---|---|
-| `DEEPSEEK_API_KEY` | DeepSeek API Key（机密） |
-| `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com` |
-| `LLM_MODEL_HEAVY` | 重任务模型（SemQL 生成、归因结论），如 `deepseek-v4-pro` |
-| `LLM_MODEL_LIGHT` | 轻任务模型（意图/改写/精排/摘要），如 `deepseek-flash` |
-| `LLM_TIMEOUT_SEC` | LLM 调用超时秒数，默认 60 |
-| `META_DB_PATH` | 元数据库路径，默认 `./data/meta.db` |
-| `BIZ_DB_PATH` | 业务库路径，默认 `./test_data/data/retail.db` |
-| `AUTH_SECRET` | token 签名密钥，生产必须改 |
-| `TZ_NAME` | 业务时区，默认 `Asia/Shanghai` |
+| 键                    | 说明                                                       |
+| --------------------- | ---------------------------------------------------------- |
+| `DEEPSEEK_API_KEY`  | DeepSeek API Key（机密）                                   |
+| `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com`                          |
+| `LLM_MODEL_HEAVY`   | 重任务模型（SemQL 生成、归因结论），如 `deepseek-v4-pro` |
+| `LLM_MODEL_LIGHT`   | 轻任务模型（意图/改写/精排/摘要），如 `deepseek-flash`   |
+| `LLM_TIMEOUT_SEC`   | LLM 调用超时秒数，默认 60                                  |
+| `META_DB_PATH`      | 元数据库路径，默认 `./data/meta.db`                      |
+| `BIZ_DB_PATH`       | 业务库路径，默认 `./test_data/data/retail.db`            |
+| `AUTH_SECRET`       | token 签名密钥，生产必须改                                 |
+| `TZ_NAME`           | 业务时区，默认 `Asia/Shanghai`                           |
 
 ## 初始化
 
@@ -66,12 +66,12 @@ python scripts/run_server.py        # 启动 FastAPI
 
 演示账号（密码均为 `Init@123456`，仅演示）：
 
-| 账号 | 角色 | 数据范围 |
-|---|---|---|
-| `admin` | admin | 全部 |
-| `analyst` | analyst | 全部 |
+| 账号         | 角色             | 数据范围                    |
+| ------------ | ---------------- | --------------------------- |
+| `admin`    | admin            | 全部                        |
+| `analyst`  | analyst          | 全部                        |
 | `east_mgr` | analyst + 行策略 | 仅华东大区（dim_region=HD） |
-| `viewer1` | viewer | 仅查看 |
+| `viewer1`  | viewer           | 仅查看                      |
 
 ## 测试
 
@@ -101,12 +101,3 @@ chatbi/
 ├── tests/                  # pytest（不依赖 LLM）
 └── test_data/              # input/questions.json expected/expectations.json data/retail.db output/
 ```
-
-## 与 PRD 的差异（本地版技术适配，详见 IMPLEMENTATION_SPEC.md 第 0 节）
-
-- vLLM 私有化模型 → DeepSeek API（OpenAI 兼容，heavy/light 双模型）
-- PostgreSQL+pgvector → SQLite（元数据）；ClickHouse → SQLite（业务库，方言经 compiler 隔离）
-- 向量召回路 → 去掉（DeepSeek 无 embedding API），schema linking = jieba 词典 + LLM 精排两路
-- Celery+Redis → 同步执行 + 进程内会话上下文缓存（本地单进程）
-- bcrypt → pbkdf2（标准库）；JWT → HMAC 签名简易 token
-- React 前端 → 单页 `static/index.html`（原生 JS + ECharts CDN，失败降级表格）

@@ -41,5 +41,7 @@ Thumbs.db
 tmp/
 
 # ===== docs =====
-docs/RUNBOOK.md
-docs/ChatBI_PRD.md
+docs/
+
+# ===== demo videos =====
+demo/
