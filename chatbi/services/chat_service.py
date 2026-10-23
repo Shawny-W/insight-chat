@@ -43,7 +43,10 @@ def _ev(event: str, data: dict) -> dict:
 
 def _get_ctx(session_id: str) -> dict:
     return _CTX.setdefault(session_id,
-                           {"turns": [], "last_semql": None, "clarify_pending": None})
+                           {"turns": [], "last_semql": None, "clarify_pending": None,
+                            # 会话内已澄清选择记忆：{"term:<mention>": term_id,
+                            # "value:<mention>": "dim_id|tech"}，追问时沿用不再重复发问
+                            "clarify_choices": {}})
 
 
 # ---------- 归因问题的期间解析 ----------
@@ -130,6 +133,89 @@ def _columns_meta(result: dict) -> list[dict]:
     return meta
 
 
+# ---------- 澄清选择的合并与记忆 ----------
+
+def _merge_choice(amb_type: str, mention: str | None, selected_key: str,
+                  intent: IntentResult, link_result) -> bool:
+    """把澄清选项合并进 intent/link_result（clarify 续走与会话记忆沿用共用）。
+
+    返回是否实际生效。
+    """
+    if amb_type == "TERM_CONFLICT" and selected_key:
+        link_result.matched_elements = [
+            m for m in link_result.matched_elements
+            if not (m["element_type"] == "term"
+                    and m["mention"] == mention
+                    and m["element_id"] != selected_key)
+        ]
+        # 兜底：用户所选 term 若不在命中列表里（如仅来自 LLM 候选），补一条命中，
+        # 确保下游 prompt 注入该术语口径、LLM 按所选指标出 SemQL
+        if not any(m["element_type"] == "term" and m["element_id"] == selected_key
+                   for m in link_result.matched_elements):
+            link_result.matched_elements.append(
+                {"element_type": "term", "element_id": selected_key,
+                 "mention": mention or ""})
+        return True
+    if amb_type == "VALUE_CONFLICT" and selected_key:
+        dim_id, _, tech = selected_key.partition("|")
+        link_result.matched_elements = [
+            m for m in link_result.matched_elements
+            if not (m["element_type"] == "dim_value"
+                    and m["mention"] == mention
+                    and not (m["element_id"] == dim_id
+                             and m.get("tech_value") == tech))
+        ]
+        return True
+    if amb_type == "TIME_MISSING" and selected_key:
+        try:
+            s, e = resolve_time_range(selected_key, today())
+            intent.time_range = {"start": s, "end": e}
+            return True
+        except ValueError:
+            return False
+    if amb_type == "GRAIN_MISSING" and selected_key:
+        intent.grain = selected_key
+        return True
+    return False
+
+
+def _apply_clarify_memory(ambiguities: list[dict], intent: IntentResult, link_result,
+                          ctx: dict, snapshot) -> tuple[list[dict], list[str]]:
+    """同一会话内沿用用户已澄清的选择（如“销售额”→净销售额），不再重复发问。
+
+    记忆中的选项必须仍在本次歧义候选内（语义层可能已变更），否则视为失效照常追问。
+    返回 (剩余歧义, 沿用说明)。
+    """
+    choices = ctx.get("clarify_choices") or {}
+    if not choices or not ambiguities:
+        return ambiguities, []
+    remaining: list[dict] = []
+    notes: list[str] = []
+    for amb in ambiguities:
+        atype, mention = amb["type"], amb.get("mention")
+        selected = None
+        label = None
+        if atype == "TERM_CONFLICT":
+            cand = choices.get(f"term:{mention or ''}")
+            if cand and cand in (amb.get("candidates") or []):
+                selected = cand
+                label = snapshot.terms.get(cand, {}).get("name", cand)
+        elif atype == "VALUE_CONFLICT":
+            cand = choices.get(f"value:{mention or ''}")
+            if cand:
+                dim_id, _, tech = cand.partition("|")
+                hit = next((c for c in (amb.get("candidates") or [])
+                            if c.startswith(f"{dim_id}:{tech}(")), None)
+                if hit:
+                    selected = cand
+                    label = hit.partition("(")[2].rstrip(")") or tech
+        if selected and _merge_choice(atype, mention, selected, intent, link_result):
+            notes.append(f"沿用本次会话的澄清选择：「{mention}」按「{label}」查询")
+            continue
+        remaining.append(amb)
+    return remaining, notes
+
+
 # ---------- 澄清挂起的续走 ----------
 
 def clarify(user: dict, clarify_id: str, selected_key: str | None = None,
@@ -156,37 +242,13 @@ def clarify(user: dict, clarify_id: str, selected_key: str | None = None,
     # 合并选择
     intent: IntentResult = p["intent"]
     link_result = p["link_result"]
-    if p["type"] == "TERM_CONFLICT" and selected_key:
-        link_result.matched_elements = [
-            m for m in link_result.matched_elements
-            if not (m["element_type"] == "term"
-                    and m["mention"] == p["mention"]
-                    and m["element_id"] != selected_key)
-        ]
-        # 兜底：用户所选 term 若不在命中列表里（如仅来自 LLM 候选），补一条命中，
-        # 确保下游 prompt 注入该术语口径、LLM 按所选指标出 SemQL
-        if not any(m["element_type"] == "term" and m["element_id"] == selected_key
-                   for m in link_result.matched_elements):
-            link_result.matched_elements.append(
-                {"element_type": "term", "element_id": selected_key,
-                 "mention": p["mention"] or ""})
-    elif p["type"] == "VALUE_CONFLICT" and selected_key:
-        dim_id, _, tech = selected_key.partition("|")
-        link_result.matched_elements = [
-            m for m in link_result.matched_elements
-            if not (m["element_type"] == "dim_value"
-                    and m["mention"] == p["mention"]
-                    and not (m["element_id"] == dim_id
-                             and m.get("tech_value") == tech))
-        ]
-    elif p["type"] == "TIME_MISSING" and selected_key:
-        try:
-            s, e = resolve_time_range(selected_key, today())
-            intent.time_range = {"start": s, "end": e}
-        except ValueError:
-            pass
-    elif p["type"] == "GRAIN_MISSING" and selected_key:
-        intent.grain = selected_key
+    if selected_key:
+        _merge_choice(p["type"], p["mention"], selected_key, intent, link_result)
+        # 记住本次会话的澄清选择，后续追问（如“那华北呢”）沿用同一口径，不再重复发问
+        if p["type"] in ("TERM_CONFLICT", "VALUE_CONFLICT"):
+            prefix = "term" if p["type"] == "TERM_CONFLICT" else "value"
+            ctx.setdefault("clarify_choices", {})[f"{prefix}:{p['mention'] or ''}"] = \
+                selected_key
     ctx["clarify_pending"] = None
     yield from _run_data_query(user, session_id, question, intent, link_result,
                                ctx, clarified=True)
@@ -254,8 +316,10 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
     yield _ev("progress", {"stage": "schema_linking"})
     link_result = link(rewritten, intent.mentions, snapshot, intent.dataset_id)
 
-    # 歧义复核 → 澄清
+    # 歧义复核 → 先沿用会话内已澄清的选择，仍有剩余歧义才发澄清卡
     ambiguities = detect_ambiguities(rewritten, intent, link_result, snapshot)
+    ambiguities, inherit_notes = _apply_clarify_memory(
+        ambiguities, intent, link_result, ctx, snapshot)
     clarify_round = (ctx.get("clarify_pending", {}) or {}).get("round", 0) + 1
     if ambiguities and clarify_round <= MAX_CLARIFY_ROUNDS:
         card = build_clarify(ambiguities, snapshot, round=clarify_round)
@@ -279,18 +343,21 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
             yield _ev("clarify", card.to_dict())
             return
 
-    # 分派
+    # 分派（inherit_notes 非空表示已按会话记忆改写 link_result，需透传给 run_query）
     if intent.intent in (Intent.INSIGHT_WHY, Intent.INSIGHT_ANOMALY_CHECK):
-        yield from _run_insight(user, session_id, rewritten, intent, link_result, ctx)
+        yield from _run_insight(user, session_id, rewritten, intent, link_result, ctx,
+                                pre_notes=inherit_notes)
     else:
-        yield from _run_data_query(user, session_id, rewritten, intent, link_result, ctx)
+        yield from _run_data_query(user, session_id, rewritten, intent, link_result, ctx,
+                                   pre_notes=inherit_notes)
 
 
 def _run_data_query(user: dict, session_id: str, question: str, intent: IntentResult,
-                    link_result, ctx: dict, clarified: bool = False) -> Iterator[dict]:
+                    link_result, ctx: dict, clarified: bool = False,
+                    pre_notes: list[str] | None = None) -> Iterator[dict]:
     """DATA_QUERY 链路：generate→compile→gateway→execute→chart→summary。"""
     snapshot = load_snapshot()
-    assumptions: list[str] = []
+    assumptions: list[str] = list(pre_notes or [])
     time_range = intent.time_range
     if time_range is None:
         ds = snapshot.datasets.get(intent.dataset_id or "") or next(
@@ -307,9 +374,9 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
                            time_range=time_range, grain=intent.grain,
                            ctx_turns=ctx.get("turns"), session_id=session_id,
                            snapshot=snapshot,
-                           # 澄清续走：复用已按用户选择过滤的 link_result；
+                           # 澄清续走/沿用会话记忆：复用已按用户选择过滤的 link_result；
                            # 否则传 None 由 run_query 内部重新 link（保持原有行为）
-                           link_result=link_result if clarified else None)
+                           link_result=link_result if (clarified or pre_notes) else None)
     except LLMGenerateFailedError as exc:
         yield _ev("error", {"code": "LLM_GENERATE_FAILED",
                             "message": "这个问题有点复杂，我暂时无法准确理解。"
@@ -373,13 +440,15 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
 
 
 def _run_insight(user: dict, session_id: str, question: str, intent: IntentResult,
-                 link_result, ctx: dict) -> Iterator[dict]:
+                 link_result, ctx: dict,
+                 pre_notes: list[str] | None = None) -> Iterator[dict]:
     """INSIGHT_WHY / INSIGHT_ANOMALY_CHECK 链路：fluctuation → attribution → narrative。"""
     snapshot = load_snapshot()
     policies = get_user_policies(user["id"])
     flat_policies = policies["row_policies"] + policies["column_policies"]
     metric_id = _pick_metric(snapshot, link_result)
     period_a, period_b, assumptions = _parse_why_periods(question, intent)
+    assumptions = list(pre_notes or []) + assumptions
     base_filters = [{"dimension": "dim_channel", "op": "not_in", "values": ["TEST"]}]
     # 把问题中命中的维度值（如"华北区"→HB）并入基础过滤：
     # 否则波动识别/归因按全公司口径计算，与同会话内按维度过滤的查询结果互相矛盾
