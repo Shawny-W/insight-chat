@@ -1,17 +1,21 @@
 """对话服务编排（契约见 spec 第 6 节：ask(user, session_id, question) -> 事件生成器）。
 
 事件序列（PRD 6.1.4）：intent → clarify（挂起）/ progress → result / error。
-会话上下文：SQLite chat_session/chat_message + 进程内 dict 缓存 last_semql。
+会话上下文：SQLite chat_session/chat_message/chat_context + 进程内 OrderedDict LRU。
+长期用户记忆契约见 docs/MEMORY_SYSTEM.md。
 """
 
+from collections import OrderedDict
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Iterator
 
 from chatbi.chart.rules import choose
-from chatbi.config import INSIGHT_SIGNIFICANT_PCT, INSIGHT_SIGMA_K
+from chatbi.config import INSIGHT_SIGNIFICANT_PCT, INSIGHT_SIGMA_K, \
+    MEMORY_CONTEXT_CACHE_SIZE, MEMORY_SESSION_TTL_HOURS
 from chatbi.db import get_meta_conn
 from chatbi.insight.attribution import AttributionError, attribute
 from chatbi.insight.fluctuation import detect
@@ -27,26 +31,71 @@ from chatbi.query.generator import LLMGenerateFailedError
 from chatbi.query.semql import resolve_time_range
 from chatbi.nlp.intent import today
 from chatbi.semantic.store import load_snapshot
-from chatbi.services import history
+from chatbi.services import history, memory
 from chatbi.services.auth import get_user_policies
 from chatbi.services.query_service import run_query
 
 logger = logging.getLogger(__name__)
 
-# 进程内会话上下文缓存（session_id → {turns, last_semql, clarify_pending}）
-_CTX: dict[str, dict] = {}
+# LRU 进程缓存只是加速层；可序列化状态同步落 chat_context，服务重启后可恢复
+_CTX: OrderedDict[str, dict] = OrderedDict()
 
 
 def _ev(event: str, data: dict) -> dict:
     return {"event": event, "data": data}
 
 
-def _get_ctx(session_id: str) -> dict:
-    return _CTX.setdefault(session_id,
-                           {"turns": [], "last_semql": None, "clarify_pending": None,
-                            # 会话内已澄清选择记忆：{"term:<mention>": term_id,
-                            # "value:<mention>": "dim_id|tech"}，追问时沿用不再重复发问
-                            "clarify_choices": {}})
+def _blank_ctx() -> dict:
+    return {"turns": [], "last_semql": None, "clarify_pending": None,
+            # 会话内已澄清选择记忆：{"term:<mention>": term_id,
+            # "value:<mention>": "dim_id|tech"}，追问时沿用不再重复发问
+            "clarify_choices": {}, "last_answer": None, "_last_used": time.time()}
+
+
+def _get_ctx(session_id: str, user_id: str) -> dict:
+    now = time.time()
+    cached = _CTX.get(session_id)
+    if cached is not None and now - cached.get("_last_used", now) \
+            < MEMORY_SESSION_TTL_HOURS * 3600:
+        cached["_last_used"] = now
+        _CTX.move_to_end(session_id)
+        return cached
+
+    ctx = _blank_ctx()
+    try:
+        persisted = memory.load_session_context(session_id, user_id)
+        if persisted:
+            ctx.update(persisted)
+    except Exception as exc:  # noqa: BLE001 - 持久化不可用时退回原有进程内上下文
+        logger.warning("会话上下文恢复失败（使用空上下文）: %s", exc)
+    ctx["_last_used"] = now
+    _CTX[session_id] = ctx
+    _CTX.move_to_end(session_id)
+
+    # 优先淘汰无 pending 的最久未用会话，避免正在等待澄清的上下文被意外清掉
+    while len(_CTX) > max(1, MEMORY_CONTEXT_CACHE_SIZE):
+        victim = next((sid for sid, value in _CTX.items()
+                       if sid != session_id and not value.get("clarify_pending")), None)
+        if victim is None:
+            break
+        _CTX.pop(victim, None)
+    return ctx
+
+
+def _persist_ctx(user_id: str, session_id: str, ctx: dict) -> None:
+    ctx["_last_used"] = time.time()
+    state = {key: ctx.get(key) for key in
+             ("turns", "last_semql", "clarify_choices", "last_answer")}
+    try:
+        memory.save_session_context(session_id, user_id, state)
+    except Exception as exc:  # noqa: BLE001 - 持久化失败不阻断已完成的查询
+        logger.warning("会话上下文保存失败（本次结果不受影响）: %s", exc)
+
+
+def discard_session_memory(session_id: str, user_id: str) -> None:
+    """删除会话时同步清理两级短期记忆。"""
+    _CTX.pop(session_id, None)
+    memory.clear_session_context(session_id, user_id)
 
 
 # ---------- 归因问题的期间解析 ----------
@@ -133,6 +182,192 @@ def _columns_meta(result: dict) -> list[dict]:
     return meta
 
 
+# ---------- 用户记忆命令（严格匹配，不消耗 LLM，也不进入 NL2SQL） ----------
+
+def _parse_memory_command(question: str, snapshot) -> dict | None:
+    text = question.strip().rstrip("。！!？?")
+    if re.fullmatch(r"(?:你)?(?:还记得|记得|记住了)(?:我)?(?:什么|哪些)(?:记忆|偏好|内容)?",
+                    text) or re.fullmatch(r"(?:查看|看看)(?:我的)?(?:记忆|偏好)", text):
+        return {"type": "list"}
+    if re.fullmatch(r"(?:请)?(?:忘掉|忘记|删除)(?:我的)?(?:全部|所有)(?:记忆|偏好)(?:吧)?", text):
+        return {"type": "forget_all"}
+    if re.fullmatch(r"(?:请)?(?:忘掉|忘记|删除)(?:我的)?(?:全部|所有)?图表偏好(?:吧)?", text):
+        return {"type": "forget_category", "category": "chart_preference"}
+    if re.fullmatch(r"(?:请)?(?:忘掉|忘记|删除)(?:我的)?(?:全部|所有)?(?:问答|问答对)记忆(?:吧)?", text):
+        return {"type": "forget_category", "category": "query_exemplar"}
+    forget_term = re.fullmatch(
+        r"(?:请)?(?:忘掉|忘记|删除)(?:我的)?[“\"]?([^”\"，,]+?)[”\"]?(?:的)?(?:口径|映射|术语偏好)",
+        text)
+    if forget_term:
+        return {"type": "forget_term", "mention": forget_term.group(1).strip()}
+
+    chart_pattern = "|".join(re.escape(name) for name in
+                             sorted(memory.CHART_ALIASES, key=len, reverse=True))
+    switch = re.fullmatch(
+        rf"(?:请)?(?:(?:把|将)?(?:这张|这个|当前|上述|上面)?(?:图|图表)?)?"
+        rf"(?:换成|改成|变为|切换为|生成|画成|用)({chart_pattern})", text)
+    if switch:
+        return {"type": "switch_chart",
+                "chart_type": memory.CHART_ALIASES[switch.group(1)]}
+
+    explicit_remember = re.match(r"^(?:请)?记住", text)
+    future_preference = re.match(r"^(?:以后|今后)", text) and any(
+        marker in text for marker in ("都用", "都按", "都指", "一直", "默认", "偏好"))
+    # “以后/今后”也是正常业务问句的常见开头，只有明确偏好句式才接管
+    if not explicit_remember and not future_preference:
+        return None
+    chart_type = next((kind for alias, kind in memory.CHART_ALIASES.items() if alias in text), None)
+    if chart_type:
+        family = None
+        if any(word in text for word in ("趋势", "走势", "变化")):
+            family = "trend"
+        elif any(word in text for word in ("对比", "比较", "分类")):
+            family = "category"
+        elif any(word in text for word in ("占比", "构成", "比例")):
+            family = "proportion"
+        elif "单指标" in text:
+            family = "single_metric"
+        if family is None:
+            return {"type": "memory_error",
+                    "message": "请说明偏好的数据场景，例如「以后趋势都用折线图」或「以后分类对比都用柱状图」。"}
+        return {"type": "remember_chart", "family": family, "chart_type": chart_type}
+
+    term_match = re.fullmatch(
+        r"(?:请)?(?:记住|以后|今后)(?:将|把)?\s*[“\"]?([^”\"，,]+?)[”\"]?\s*"
+        r"(?:都)?(?:指|按|是|理解为)\s*[“\"]?([^”\"，,]+?)[”\"]?", text)
+    if term_match:
+        mention, target = (part.strip() for part in term_match.groups())
+        if not mention or len(mention) > 64 or len(target) > 64:
+            return {"type": "memory_error", "message": "术语名称不能为空且不能超过 64 字。"}
+        exact, aliases = [], []
+        for term_id, term in snapshot.terms.items():
+            if term.get("term_type") != "metric_term":
+                continue
+            term_aliases = term.get("aliases") or []
+            if isinstance(term_aliases, str):
+                try:
+                    term_aliases = json.loads(term_aliases)
+                except json.JSONDecodeError:
+                    term_aliases = []
+            if term.get("name") == target:
+                exact.append(term_id)
+            elif target in term_aliases:
+                aliases.append(term_id)
+        candidates = exact or aliases
+        if len(candidates) != 1:
+            return {"type": "memory_error",
+                    "message": f"找不到唯一指标「{target}」，请使用完整指标名，例如「净销售额」。"}
+        return {"type": "remember_term", "mention": mention, "term_id": candidates[0]}
+    if not explicit_remember:
+        return None
+    return {"type": "memory_error",
+            "message": "我可以记住图表或指标口径偏好，例如「以后趋势都用折线图」"
+                       "或「记住销售额指净销售额」。"}
+
+
+def _memory_text(session_id: str, text: str, command: str,
+                 trace: list[str] | None = None) -> dict:
+    conn = get_meta_conn()
+    try:
+        history.save_message(session_id, "assistant", text, intent="MEMORY", conn=conn)
+    finally:
+        conn.close()
+    return _ev("result", {"answer_type": "text", "summary": text,
+                          "assumptions": [], "memory_trace": trace or [],
+                          "memory_command": command})
+
+
+def _handle_memory_command(user: dict, session_id: str, ctx: dict, command: dict,
+                           snapshot) -> dict:
+    """执行记忆命令并返回 result 事件；显式失败不会降级成数据查询。"""
+    ctype = command["type"]
+    if ctype == "memory_error":
+        return _memory_text(session_id, command["message"], ctype)
+    if ctype == "remember_chart":
+        chart_name = memory.CHART_NAMES[command["chart_type"]]
+        family_name = memory.FAMILY_NAMES[command["family"]]
+        memory.remember_preference(
+            user["id"], "chart_preference", command["family"],
+            {"chart_type": command["chart_type"]}, source="explicit", session_id=session_id)
+        text = f"已记住：您在{family_name}场景偏好{chart_name}，后续查询会自动沿用。"
+        return _memory_text(session_id, text, ctype, [text])
+    if ctype == "remember_term":
+        term = snapshot.terms[command["term_id"]]
+        memory.remember_preference(
+            user["id"], "term_mapping", command["mention"],
+            {"term_id": command["term_id"]}, source="explicit", session_id=session_id)
+        ctx.setdefault("clarify_choices", {})[f"term:{command['mention']}"] = command["term_id"]
+        _persist_ctx(user["id"], session_id, ctx)
+        text = f"已记住：「{command['mention']}」按「{term['name']}」查询。"
+        return _memory_text(session_id, text, ctype, [text])
+    if ctype == "switch_chart":
+        last_answer = ctx.get("last_answer") or {}
+        if not last_answer.get("answer_id"):
+            return _memory_text(session_id, "还没有可切换的图表，请先完成一次数据查询。", ctype)
+        try:
+            switched = memory.switch_answer_chart(
+                user["id"], last_answer["answer_id"], command["chart_type"],
+                session_id=session_id, source="explicit")
+        except (KeyError, ValueError) as exc:
+            return _memory_text(session_id, str(exc), ctype)
+        result = switched["result"]
+        ctx["last_answer"] = {"answer_id": last_answer["answer_id"],
+                              "family": result["chart"].get("family", "other")}
+        _persist_ctx(user["id"], session_id, ctx)
+        conn = get_meta_conn()
+        try:
+            history.save_message(session_id, "assistant", switched["memory_trace"][0],
+                                 intent="MEMORY", conn=conn)
+        finally:
+            conn.close()
+        return _ev("result", result)
+    if ctype == "list":
+        items = memory.list_memories(user["id"])
+        semantic = [item for item in items if item["memory_type"] == "semantic"]
+        exemplar_count = sum(1 for item in items if item["category"] == "query_exemplar"
+                             and not item["decayed"])
+        if not semantic and not exemplar_count:
+            return _memory_text(session_id, "我还没有记住您的偏好。您可以对我说「以后趋势都用折线图」。", ctype)
+        lines = ["我当前记得："]
+        for item in semantic[:10]:
+            if item["category"] == "chart_preference":
+                label = f"{item['family_name']} → {item['chart_name']}"
+            else:
+                term_id = item["value"].get("term_id", "")
+                term_name = snapshot.terms.get(term_id, {}).get("name", term_id)
+                label = f"「{item['memory_key']}」→「{term_name}」"
+            state = "（待跨会话确认）" if item["status"] == "candidate" \
+                else ("（已衰减，不生效）" if item["decayed"] else "")
+            lines.append(f"{len(lines)}. {label}{state}")
+        if exemplar_count:
+            lines.append(f"另有 {exemplar_count} 条您已确认的个人问答对。")
+        lines.append("可在右上角「记忆」中逐条删除，或对我说「忘掉全部记忆」。")
+        return _memory_text(session_id, "\n".join(lines), ctype)
+    if ctype == "forget_category":
+        count = memory.clear_memories(user["id"], command["category"])
+        label = "图表偏好" if command["category"] == "chart_preference" else "个人问答对"
+        return _memory_text(session_id, f"已忘掉 {count} 条{label}记忆，历史审计记录保留。", ctype)
+    if ctype == "forget_term":
+        mention = command["mention"]
+        targets = [item for item in memory.list_memories(user["id"])
+                   if item["category"] == "term_mapping" and item["memory_key"] == mention]
+        for item in targets:
+            memory.delete_memory(user["id"], item["id"])
+        ctx.setdefault("clarify_choices", {}).pop(f"term:{mention}", None)
+        _persist_ctx(user["id"], session_id, ctx)
+        return _memory_text(session_id, f"已忘掉 {len(targets)} 条「{mention}」口径记忆。", ctype)
+    if ctype == "forget_all":
+        count = memory.clear_memories(user["id"])
+        ctx.update({"turns": [], "last_semql": None, "clarify_pending": None,
+                    "clarify_choices": {}, "last_answer": None})
+        _persist_ctx(user["id"], session_id, ctx)
+        return _memory_text(
+            session_id,
+            f"已忘掉 {count} 条长期记忆，并清空当前会话上下文；历史消息与审计记录保留。",
+            ctype)
+    return _memory_text(session_id, "暂不支持该记忆操作。", "memory_error")
+
+
 # ---------- 澄清选择的合并与记忆 ----------
 
 def _merge_choice(amb_type: str, mention: str | None, selected_key: str,
@@ -180,14 +415,13 @@ def _merge_choice(amb_type: str, mention: str | None, selected_key: str,
 
 
 def _apply_clarify_memory(ambiguities: list[dict], intent: IntentResult, link_result,
-                          ctx: dict, snapshot) -> tuple[list[dict], list[str]]:
-    """同一会话内沿用用户已澄清的选择（如“销售额”→净销售额），不再重复发问。
-
-    记忆中的选项必须仍在本次歧义候选内（语义层可能已变更），否则视为失效照常追问。
-    返回 (剩余歧义, 沿用说明)。
-    """
+                          ctx: dict, snapshot, long_term: dict | None = None,
+                          user_id: str | None = None,
+                          session_id: str | None = None) -> tuple[list[dict], list[str]]:
+    """依次沿用会话选择和长期口径偏好；候选已变化时失效并照常追问。"""
     choices = ctx.get("clarify_choices") or {}
-    if not choices or not ambiguities:
+    long_term = long_term or {}
+    if (not choices and not long_term) or not ambiguities:
         return ambiguities, []
     remaining: list[dict] = []
     notes: list[str] = []
@@ -195,11 +429,19 @@ def _apply_clarify_memory(ambiguities: list[dict], intent: IntentResult, link_re
         atype, mention = amb["type"], amb.get("mention")
         selected = None
         label = None
+        long_term_id = None
         if atype == "TERM_CONFLICT":
             cand = choices.get(f"term:{mention or ''}")
             if cand and cand in (amb.get("candidates") or []):
                 selected = cand
                 label = snapshot.terms.get(cand, {}).get("name", cand)
+            else:
+                # 会话选择优先；长期偏好也必须在本次候选中，避免语义层变更后强用旧口径
+                preference = long_term.get(f"term:{mention or ''}")
+                if preference and preference["selected_key"] in (amb.get("candidates") or []):
+                    selected = preference["selected_key"]
+                    label = preference["label"]
+                    long_term_id = preference["memory_id"]
         elif atype == "VALUE_CONFLICT":
             cand = choices.get(f"value:{mention or ''}")
             if cand:
@@ -210,7 +452,15 @@ def _apply_clarify_memory(ambiguities: list[dict], intent: IntentResult, link_re
                     selected = cand
                     label = hit.partition("(")[2].rstrip(")") or tech
         if selected and _merge_choice(atype, mention, selected, intent, link_result):
-            notes.append(f"沿用本次会话的澄清选择：「{mention}」按「{label}」查询")
+            if long_term_id:
+                notes.append(f"沿用您的长期口径偏好：「{mention}」按「{label}」查询")
+                if user_id:
+                    try:
+                        memory.mark_accessed(long_term_id, user_id, session_id)
+                    except Exception as exc:  # noqa: BLE001 - 统计失败不影响已生效的选择
+                        logger.warning("长期记忆访问统计失败: %s", exc)
+            else:
+                notes.append(f"沿用本次会话的澄清选择：「{mention}」按「{label}」查询")
             continue
         remaining.append(amb)
     return remaining, notes
@@ -222,7 +472,7 @@ def clarify(user: dict, clarify_id: str, selected_key: str | None = None,
             free_text: str | None = None) -> Iterator[dict]:
     """澄清响应后续走查询链路（契约见 spec）。"""
     pending = None
-    for sid, ctx in _CTX.items():
+    for sid, ctx in list(_CTX.items()):  # 快照遍历，避免并发 LRU 结构调整导致迭代异常
         p = ctx.get("clarify_pending")
         if p and p["clarify_id"] == clarify_id:
             pending = (sid, ctx, p)
@@ -232,26 +482,55 @@ def clarify(user: dict, clarify_id: str, selected_key: str | None = None,
                             "message": "澄清已过期，请重新提问", "retryable": False})
         return
     session_id, ctx, p = pending
+    if p.get("user_id") != user["id"]:
+        yield _ev("error", {"code": "FORBIDDEN", "message": "无权处理他人的澄清",
+                            "retryable": False})
+        return
     question = p["question"]
 
     if free_text:
         ctx["clarify_pending"] = None
         yield from ask(user, session_id, f"{question}（补充：{free_text}）")
         return
+    if not selected_key:
+        yield _ev("error", {"code": "CLARIFY_OPTION_REQUIRED",
+                            "message": "请选择一个澄清选项", "retryable": False})
+        return
 
-    # 合并选择
+    # 校验选项来自当前卡片，防止伪造 term/dimension 写入口径记忆
+    candidates = p.get("candidates") or []
+    if p["type"] == "VALUE_CONFLICT":
+        dim_id, _, tech = selected_key.partition("|")
+        valid = not candidates or any(c.startswith(f"{dim_id}:{tech}(") for c in candidates)
+    else:
+        valid = not candidates or selected_key in candidates
     intent: IntentResult = p["intent"]
     link_result = p["link_result"]
-    if selected_key:
-        _merge_choice(p["type"], p["mention"], selected_key, intent, link_result)
-        # 记住本次会话的澄清选择，后续追问（如“那华北呢”）沿用同一口径，不再重复发问
-        if p["type"] in ("TERM_CONFLICT", "VALUE_CONFLICT"):
-            prefix = "term" if p["type"] == "TERM_CONFLICT" else "value"
-            ctx.setdefault("clarify_choices", {})[f"{prefix}:{p['mention'] or ''}"] = \
-                selected_key
+    merged = valid and _merge_choice(p["type"], p["mention"], selected_key, intent, link_result)
+    if not valid or (p["type"] in ("TERM_CONFLICT", "VALUE_CONFLICT") and not merged):
+        yield _ev("error", {"code": "CLARIFY_OPTION_INVALID",
+                            "message": "该选项已失效，请重新提问", "retryable": False})
+        return
+    # TIME_MISSING 的 custom 等自由输入选项不合并，保留原有默认时间兜底行为
+
+    memory_notes = []
+    if p["type"] in ("TERM_CONFLICT", "VALUE_CONFLICT"):
+        prefix = "term" if p["type"] == "TERM_CONFLICT" else "value"
+        ctx.setdefault("clarify_choices", {})[f"{prefix}:{p['mention'] or ''}"] = selected_key
+        if p["type"] == "TERM_CONFLICT":
+            try:
+                observed = memory.observe_term_choice(
+                    user["id"], p["mention"] or "", selected_key, session_id)
+                if observed["promoted"]:
+                    memory_notes.append(
+                        f"已根据您在 {observed['sessions']} 个会话中的一致选择，"
+                        "将「" + (p["mention"] or "") + "」的口径记为长期偏好")
+            except Exception as exc:  # noqa: BLE001 - 长期晋升失败不影响本次澄清
+                logger.warning("澄清选择长期记忆写入失败: %s", exc)
     ctx["clarify_pending"] = None
+    _persist_ctx(user["id"], session_id, ctx)
     yield from _run_data_query(user, session_id, question, intent, link_result,
-                               ctx, clarified=True)
+                               ctx, clarified=True, pre_notes=memory_notes)
 
 
 # ---------- 主入口 ----------
@@ -275,8 +554,24 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
     finally:
         conn.close()
 
-    ctx = _get_ctx(session_id)
+    ctx = _get_ctx(session_id, user["id"])
     snapshot = load_snapshot()
+
+    # 记忆命令是严格匹配的独立入口，普通“用折线图展示……”仍按数据问题处理
+    command = _parse_memory_command(question, snapshot)
+    if command:
+        yield _ev("intent", {"intent": "MEMORY", "mentions": [], "time_range": None,
+                             "grain": None, "degraded": False, "assumptions": [],
+                             "session_id": session_id, "question": question,
+                             "rewritten": False, "inherits": False,
+                             "memory_command": command["type"]})
+        try:
+            yield _handle_memory_command(user, session_id, ctx, command, snapshot)
+        except Exception as exc:  # noqa: BLE001 - 记忆操作异常不应冲垮 SSE 通道
+            logger.exception("记忆命令执行失败")
+            yield _memory_text(session_id, f"记忆操作未完成：{exc}。数据查询功能不受影响。",
+                               "memory_error")
+        return
 
     # 指代改写（有上下文时）
     rewritten, inherits, topic_changed = rewrite(question, ctx.get("turns") or [])
@@ -316,10 +611,16 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
     yield _ev("progress", {"stage": "schema_linking"})
     link_result = link(rewritten, intent.mentions, snapshot, intent.dataset_id)
 
-    # 歧义复核 → 先沿用会话内已澄清的选择，仍有剩余歧义才发澄清卡
+    # 歧义复核：当前会话选择优先，其次是仍有效的长期口径偏好
     ambiguities = detect_ambiguities(rewritten, intent, link_result, snapshot)
+    try:
+        long_term = memory.get_term_preferences(user["id"], snapshot)
+    except Exception as exc:  # noqa: BLE001 - 长期记忆不可用时保留会话记忆和澄清卡
+        logger.warning("长期口径偏好读取失败（已降级）: %s", exc)
+        long_term = {}
     ambiguities, inherit_notes = _apply_clarify_memory(
-        ambiguities, intent, link_result, ctx, snapshot)
+        ambiguities, intent, link_result, ctx, snapshot, long_term,
+        user_id=user["id"], session_id=session_id)
     clarify_round = (ctx.get("clarify_pending", {}) or {}).get("round", 0) + 1
     if ambiguities and clarify_round <= MAX_CLARIFY_ROUNDS:
         card = build_clarify(ambiguities, snapshot, round=clarify_round)
@@ -330,8 +631,9 @@ def ask(user: dict, session_id: str | None, question: str) -> Iterator[dict]:
             ctx["clarify_pending"] = {
                 "clarify_id": card.clarify_id, "question": rewritten, "intent": intent,
                 "link_result": link_result, "round": clarify_round,
-                "type": card.type,
+                "type": card.type, "user_id": user["id"],
                 "mention": chosen_amb.get("mention"),
+                "candidates": chosen_amb.get("candidates") or [],
             }
             conn = get_meta_conn()
             try:
@@ -400,6 +702,14 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
     yield _ev("progress", {"stage": "executing"})
     cols_meta = _columns_meta(result)
     chart = choose(cols_meta, result["rows"], result["semql"])
+    try:
+        chart, chart_notes = memory.personalize_chart(
+            user["id"], chart, cols_meta, result["semql"], question, session_id)
+    except Exception as exc:  # noqa: BLE001 - 图表偏好失败时使用原规则推荐
+        logger.warning("图表偏好读取失败（已降级）: %s", exc)
+        chart_notes = []
+    assumptions.extend(chart_notes)
+    memory_trace = list(pre_notes or []) + list(result.get("memory_trace") or []) + chart_notes
     summary = _summarize(question, result)
 
     policies = get_user_policies(user["id"])
@@ -418,9 +728,12 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
         conn.close()
 
     ctx["last_semql"] = result["semql"]
+    ctx["last_answer"] = {"answer_id": answer_id,
+                          "family": chart.get("family", "other")}
     ctx["turns"] = (ctx.get("turns") or [])[-4:] + [
         {"question": question, "intent": intent.intent.value,
          "semql_brief": _semql_brief(result["semql"])}]
+    _persist_ctx(user["id"], session_id, ctx)
 
     yield _ev("result", {
         "answer_type": "data",
@@ -434,6 +747,7 @@ def _run_data_query(user: dict, session_id: str, question: str, intent: IntentRe
         "chart": chart, "summary": summary,
         "match_explain": explain,
         "assumptions": assumptions + result.get("assumptions", []),
+        "memory_trace": memory_trace,
         "semantic_version": result["semantic_version"],
         "clarified": clarified,
     })
@@ -550,6 +864,7 @@ def _run_insight(user: dict, session_id: str, question: str, intent: IntentResul
     ctx["turns"] = (ctx.get("turns") or [])[-4:] + [
         {"question": question, "intent": intent.intent.value,
          "semql_brief": f"归因:{metric_name} {period_a} vs {period_b}"}]
+    _persist_ctx(user["id"], session_id, ctx)
 
     yield _ev("result", {
         "answer_type": "insight", "question": question,
@@ -559,6 +874,7 @@ def _run_insight(user: dict, session_id: str, question: str, intent: IntentResul
         "chart": {"type": "waterfall", "reason": "rule_11: 归因结果",
                   "available_types": ["waterfall", "table"]},
         "assumptions": assumptions,
+        "memory_trace": list(pre_notes or []),
         "semantic_version": snapshot.version,
     })
 
@@ -574,6 +890,7 @@ def _result_text(user, session_id, ctx, intent, text) -> dict:
         conn.close()
     ctx["turns"] = (ctx.get("turns") or [])[-4:] + [
         {"question": "", "intent": intent.intent.value}]
+    _persist_ctx(user["id"], session_id, ctx)
     return _ev("result", {"answer_type": "text", "summary": text, "assumptions": []})
 
 

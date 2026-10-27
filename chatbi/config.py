@@ -59,6 +59,16 @@ TZ_NAME: str = os.environ.get("TZ_NAME", "Asia/Shanghai").strip()
 INSIGHT_SIGNIFICANT_PCT: float = float(os.environ.get("INSIGHT_SIGNIFICANT_PCT", "5"))
 INSIGHT_SIGMA_K: float = float(os.environ.get("INSIGHT_SIGMA_K", "2"))
 
+# --- 用户记忆（短期上下文持久化 + 长期偏好衰减） ---
+MEMORY_SESSION_TTL_HOURS: int = int(os.environ.get("MEMORY_SESSION_TTL_HOURS", "72"))
+MEMORY_CONTEXT_CACHE_SIZE: int = int(os.environ.get("MEMORY_CONTEXT_CACHE_SIZE", "128"))
+MEMORY_TERM_PROMOTE_SESSIONS: int = int(os.environ.get("MEMORY_TERM_PROMOTE_SESSIONS", "3"))
+MEMORY_MIN_CONFIDENCE: float = float(os.environ.get("MEMORY_MIN_CONFIDENCE", "0.35"))
+MEMORY_EXPLICIT_HALF_LIFE_DAYS: float = float(
+    os.environ.get("MEMORY_EXPLICIT_HALF_LIFE_DAYS", "365"))
+MEMORY_INFERRED_HALF_LIFE_DAYS: float = float(
+    os.environ.get("MEMORY_INFERRED_HALF_LIFE_DAYS", "90"))
+
 # --- 派生目录 ---
 DATA_DIR: Path = META_DB_PATH.parent                     # ./data
 DICT_DIR: Path = DATA_DIR / "dict"                       # jieba 自定义词典目录

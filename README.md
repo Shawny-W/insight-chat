@@ -10,6 +10,7 @@
 - SQL 安全网关：sqlglot AST 白名单（仅 SELECT）、行/列级权限注入、限额兜底
 - 归因引擎：确定性贡献度分解 + 贪心下钻 + z_score 低基数校验，LLM 只负责表述
 - 多轮对话（指代改写继承上下文）、查询历史、反馈回流（👍 沉淀 few-shot）
+- 用户级记忆：会话上下文重启恢复、图表/口径偏好、个人问答对、衰减遗忘与本人管理
 - 单页演示前端（原生 JS + ECharts，CDN 失败自动降级表格）
 
 ## 架构（简）
@@ -48,6 +49,7 @@ pip install -e .            # 或 pip install -r requirements.txt
 | `BIZ_DB_PATH`       | 业务库路径，默认 `./test_data/data/retail.db`            |
 | `AUTH_SECRET`       | token 签名密钥，生产必须改                                 |
 | `TZ_NAME`           | 业务时区，默认 `Asia/Shanghai`                           |
+| `MEMORY_*`          | 会话 TTL、LRU、澄清晋升、置信度阈值与半衰期，默认值见 `.env.example` |
 
 ## 初始化
 
@@ -56,6 +58,8 @@ python scripts/gen_retail_data.py   # 生成演示业务库（确定性 seed=42�
 python scripts/init_db.py           # 建 meta schema → 导种子 → 发布语义层 v1 → Evidence 真实复算 → 建词典
 python scripts/check_llm.py         # 验证 DeepSeek 连通（light 模型问 1+1=?）
 ```
+
+已有数据库可幂等重跑 `init_db.py`；服务启动也会自动补齐新增元数据表，不会重置业务数据。
 
 ## 运行
 
@@ -73,10 +77,19 @@ python scripts/run_server.py        # 启动 FastAPI
 | `east_mgr` | analyst + 行策略 | 仅华东大区（dim_region=HD） |
 | `viewer1`  | viewer           | 仅查看                      |
 
+## 用户记忆
+
+- 对话中说 `以后趋势都用折线图`、`记住销售额指净销售额`，即可保存本人偏好。
+- 图表上切换类型会学习对应数据场景的偏好；普通“本次用折线图”不会自动写长期记忆。
+- `你记得我什么` 查看，`忘掉全部记忆` 清除；也可在右上角“我的记忆”逐条管理。
+- 短期上下文默认保留 72 小时并支持服务重启恢复；长期偏好按半衰期衰减，失效不删除审计历史。
+
+设计、API、配置与测试场景详见 `docs/MEMORY_SYSTEM.md`。
+
 ## 测试
 
 ```bash
-python -m pytest tests/ -q            # 单元测试（不依赖 LLM）：semql/compiler/gateway/attribution/chart
+python -m pytest tests/ -q            # 单元测试（不依赖 LLM）：semql/compiler/gateway/attribution/chart/memory
 python scripts/dev_query.py           # 不走 LLM：手工 SemQL 跑 compile→gateway→execute
 python scripts/dev_e2e_llm.py         # 真实 LLM：q01 端到端 + q04 澄清
 python scripts/dev_insight.py         # 归因引擎全量 JSON + narrative
@@ -95,7 +108,7 @@ chatbi/
 │   ├── query/              # semql.py generator.py compiler.py gateway.py executor.py
 │   ├── insight/            # fluctuation.py attribution.py narrative.py
 │   ├── chart/rules.py
-│   ├── services/           # chat_service.py query_service.py auth.py history.py feedback.py
+│   ├── services/           # chat_service.py query_service.py memory.py auth.py history.py feedback.py
 │   └── api/                # main.py deps.py routes_*.py static/index.html
 ├── scripts/                # init_db.py gen_retail_data.py check_llm.py run_server.py dev_*.py run_pipeline_test.py
 ├── tests/                  # pytest（不依赖 LLM）

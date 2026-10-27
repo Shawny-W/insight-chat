@@ -40,8 +40,8 @@ Thumbs.db
 *.bak
 tmp/
 
-# ===== docs =====
-docs/
+# ===== notes =====
+
 
 # ===== demo videos =====
 demo/

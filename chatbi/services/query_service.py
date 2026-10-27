@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -43,8 +44,8 @@ def load_policies(conn: sqlite3.Connection, user_id: str) -> list[dict]:
 
 
 def pick_exemplars(conn: sqlite3.Connection, question: str, dataset_id: str,
-                   top: int = 3) -> list[dict]:
-    """seed 问答对按字面重合度召回 top-N（同 dataset）。"""
+                   top: int = 3, user_id: str | None = None) -> list[dict]:
+    """个人已确认问答对优先，与全局 seed/反馈 exemplar 合并去重。"""
     rows = conn.execute(
         "SELECT * FROM query_exemplar WHERE dataset_id = ? AND is_active = 1",
         (dataset_id,),
@@ -55,14 +56,33 @@ def pick_exemplars(conn: sqlite3.Connection, question: str, dataset_id: str,
         return sum(1 for ch in set(question) if ch in q)
 
     ranked = sorted(rows, key=score, reverse=True)
-    picked = []
+    global_picked = []
     for r in ranked[:top]:
         d = dict(r)
         try:
             d["semql_json"] = json.loads(d["semql_json"])
         except (json.JSONDecodeError, TypeError):
             pass
-        picked.append(d)
+        global_picked.append(d)
+
+    personal = []
+    if user_id:
+        try:
+            from chatbi.services.memory import pick_personal_exemplars
+            personal = pick_personal_exemplars(user_id, question, dataset_id, top, conn=conn)
+        except Exception as exc:  # noqa: BLE001 - 个人记忆不可用时退回全局 exemplar
+            logging.getLogger(__name__).warning("个人问答对召回失败（已降级）: %s", exc)
+
+    picked, seen = [], set()
+    for item in personal + global_picked:
+        semql = item.get("semql_json")
+        key = (item.get("nl_question", ""),
+               json.dumps(semql, ensure_ascii=False, sort_keys=True, default=str))
+        if key not in seen:
+            seen.add(key)
+            picked.append(item)
+        if len(picked) >= top:
+            break
     return picked
 
 
@@ -186,7 +206,9 @@ def run_query(question: str, user_id: str = "usr_analyst", *,
             link_result = link(question, mentions or [], snapshot)
 
         # 2. SemQL 生成（三级重试链在 generate 内）
-        exemplars = pick_exemplars(conn, question, next(iter(snapshot.datasets)))
+        exemplars = pick_exemplars(conn, question, next(iter(snapshot.datasets)),
+                                   user_id=user_id)
+        personal_hits = sum(1 for item in exemplars if item.get("source") == "user_memory")
         try:
             semql = generate(question, link_result, snapshot, exemplars, ctx_turns)
         except LLMGenerateFailedError as exc:
@@ -236,6 +258,8 @@ def run_query(question: str, user_id: str = "usr_analyst", *,
             "trace": compiled.trace,
             "assumptions": [],
             "degraded": [],
+            "memory_trace": ([f"参考了您 {personal_hits} 条已确认的历史问答（仅本人可见）"]
+                             if personal_hits else []),
             "semantic_version": snapshot.version,
             "matched_elements": link_result.matched_elements,
             "elapsed_ms": elapsed_ms,

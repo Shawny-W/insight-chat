@@ -1,10 +1,13 @@
 """反馈回流服务：👍/👎 + 原因标签；👍 沉淀 NL→SemQL exemplar（3 人👍转正）；👎 进待办队列。"""
 
 import json
+import logging
 import sqlite3
 import uuid
 
 from chatbi.db import get_meta_conn
+
+logger = logging.getLogger(__name__)
 
 REASON_TAGS = ("wrong_data", "wrong_intent", "bad_chart", "untrusted_insight", "other")
 PROMOTE_UPVOTES = 3  # 同问题 3 个不同用户 👍 → exemplar 转正
@@ -54,6 +57,16 @@ def submit(user_id: str, vote: str, answer_id: str | None = None,
         if vote == "up" and answer_id:
             _upvote_to_exemplar(conn, user_id, answer_id)
             conn.commit()
+        # 个人问答对与原有全局 exemplar 分开沉淀；记忆故障不影响反馈提交
+        if answer_id:
+            try:
+                from chatbi.services import memory
+                if vote == "up":
+                    memory.remember_exemplar(user_id, answer_id)
+                else:
+                    memory.forget_exemplar(user_id, answer_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("个人问答对记忆写入失败（反馈已保存）: %s", exc)
         return {"feedback_id": fid, "updated": existing is not None}
     finally:
         conn.close()

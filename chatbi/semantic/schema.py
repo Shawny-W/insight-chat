@@ -475,6 +475,58 @@ SCHEMA_STATEMENTS: list[str] = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_llm_log_task ON llm_call_log(task, created_at DESC)",
+    # ========== 10. 用户记忆 ==========
+    # 短期会话上下文：只存可 JSON 序列化状态；pending 澄清仍保留在进程内
+    """
+    CREATE TABLE IF NOT EXISTS chat_context (
+        session_id TEXT PRIMARY KEY REFERENCES chat_session(id),
+        user_id    TEXT NOT NULL REFERENCES app_user(id),
+        state_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chat_context_user ON chat_context(user_id, updated_at DESC)",
+    # 长期记忆：同一逻辑 key 的当前版本唯一；被取代/删除的版本永久保留用于审计
+    """
+    CREATE TABLE IF NOT EXISTS user_memory (
+        id                 TEXT PRIMARY KEY,
+        user_id            TEXT NOT NULL REFERENCES app_user(id),
+        memory_type        TEXT NOT NULL,       -- semantic/episodic
+        category           TEXT NOT NULL,       -- chart_preference/term_mapping/query_exemplar
+        memory_key         TEXT NOT NULL,
+        value_json         TEXT NOT NULL,
+        confidence         REAL NOT NULL DEFAULT 1.0,
+        source             TEXT NOT NULL,       -- explicit/chart_switch/clarify/feedback
+        status             TEXT NOT NULL,       -- candidate/active/superseded/deleted
+        valid_from         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        valid_to           TEXT,
+        last_confirmed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        last_accessed_at   TEXT,
+        access_count       INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_user_memory_current
+    ON user_memory(user_id, category, memory_key)
+    WHERE status IN ('active', 'candidate')
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_user_memory_lookup ON user_memory(user_id, category, status)",
+    """
+    CREATE TABLE IF NOT EXISTS user_memory_event (
+        id         TEXT PRIMARY KEY,
+        memory_id  TEXT NOT NULL REFERENCES user_memory(id),
+        user_id    TEXT NOT NULL REFERENCES app_user(id),
+        event_type TEXT NOT NULL,             -- created/confirmed/applied/superseded/deleted/promoted
+        session_id TEXT,
+        detail_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_user_memory_event ON user_memory_event(memory_id, created_at)",
 ]
 
 

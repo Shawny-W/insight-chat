@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from chatbi.api import routes_admin, routes_auth, routes_chat, routes_feedback, \
-    routes_history, routes_insight
+    routes_history, routes_insight, routes_memory
 from chatbi.api.deps import ApiError, new_trace_id
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,14 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
+        # 幂等补齐新增元数据表，保证已有 meta.db 升级后可直接启动；种子仍由 init_db.py 负责
+        from chatbi.db import get_meta_conn
+        from chatbi.semantic.schema import init_schema
+        conn = get_meta_conn()
+        try:
+            init_schema(conn)
+        finally:
+            conn.close()
         # 启动时热加载 jieba 自定义词典（词典是发布的派生物）
         from chatbi.semantic.dictionary import load_dictionary
         load_dictionary()
@@ -51,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_insight.router, prefix=prefix)
     app.include_router(routes_history.router, prefix=prefix)
     app.include_router(routes_feedback.router, prefix=prefix)
+    app.include_router(routes_memory.router, prefix=prefix)
     app.include_router(routes_admin.router, prefix=prefix)
 
     # 静态页（演示前端）：/ → index.html

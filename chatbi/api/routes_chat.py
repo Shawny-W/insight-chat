@@ -12,7 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from chatbi.api.deps import get_current_user, require_roles
 from chatbi.services import history
-from chatbi.services.chat_service import ask, clarify
+from chatbi.services.chat_service import ask, clarify, discard_session_memory
 from chatbi.api.deps import ApiError
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ def delete_session(session_id: str, user: dict = Depends(get_current_user)):
             raise ApiError(1004, "会话不存在", 404)
         if s["user_id"] != user["id"] and "admin" not in user.get("roles", []):
             raise ApiError(1003, "您没有该操作的权限", 403)
+        discard_session_memory(session_id, s["user_id"])
         conn.execute("DELETE FROM chat_message WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM chat_session WHERE id = ?", (session_id,))
         conn.commit()
