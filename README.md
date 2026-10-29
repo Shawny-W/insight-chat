@@ -1,116 +1,169 @@
-# InsightChat（企业级对话式 BI）
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-用户用自然语言提问，系统基于 **Ontology 本体 + 语义层（MDL）** 把问题翻译为可信 SQL 并从业务库取数，自动选图呈现；对"为什么"类问题提供**自动归因洞察**（波动识别 → 贡献度下钻 → 事件关联 → LLM 结论）。
+# InsightChat: Auditable ChatBI with User-Level Memory
 
-特性：
+InsightChat is a locally runnable conversational BI application that combines natural-language analytics with a persistent, user-scoped memory system. It turns questions into validated SemQL rather than trusting LLM-written SQL, compiles SQL deterministically, enforces data controls at a security gateway, and explains both answers and the memory used to shape them.
 
-- 语义层版本化（draft/published）+ 指标口径 Evidence（真实 SQL 复算）背书
-- LLM 不直接写 SQL：生成受限 SemQL（JSON DSL），编译器确定性翻译成物理 SQL
-- Schema linking 两路：jieba 自定义词典精确匹配 + LLM 精排；澄清卡片消歧（术语多义等）
-- SQL 安全网关：sqlglot AST 白名单（仅 SELECT）、行/列级权限注入、限额兜底
-- 归因引擎：确定性贡献度分解 + 贪心下钻 + z_score 低基数校验，LLM 只负责表述
-- 多轮对话（指代改写继承上下文）、查询历史、反馈回流（👍 沉淀 few-shot）
-- 用户级记忆：会话上下文重启恢复、图表/口径偏好、个人问答对、衰减遗忘与本人管理
-- 单页演示前端（原生 JS + ECharts，CDN 失败自动降级表格）
+The project's distinguishing feature is its **BI-aware memory loop**: completed conversation context survives service restarts, chart and metric preferences can be learned per user, repeated clarification choices can become durable mappings, and liked answers can become personal few-shot examples. Confidence decay, logical deletion, history, and `memory_trace` make that personalization inspectable and reversible.
 
-## 架构（简）
+Other implemented highlights include:
 
+- **Constrained NL2SQL:** schema linking, deterministic clarification, validated SemQL, rule-based post-processing, and a deterministic SQLite compiler.
+- **Security independent of the LLM:** SELECT-only AST checks, table/function restrictions, row/column policy handling, fail-closed row filters, timeouts, and row limits.
+- **Explainable insight attribution:** fluctuation detection, contribution-based drill-down, hierarchy constraints, low-base warnings, event association, and LLM narration with template fallback.
+- **Semantic evidence and traces:** published seed snapshots, Evidence SQL executed during initialization, applied rules, final SQL, semantic versions, and memory-use traces.
+- **A lightweight complete demo:** FastAPI, two SQLite databases, and a native JavaScript UI with ECharts and table fallback—no vector database or separate frontend build.
+
+## User-Level Memory System
+
+The memory system has two layers, both isolated by `user_id`:
+
+| Layer | What is stored | How it is used |
+| --- | --- | --- |
+| Short-term session context | Recent turns, the last SemQL snapshot, term/value clarification choices, and the last answer reference | Contextual follow-ups, session-level disambiguation, and chart switching |
+| Long-term user memory | `chart_preference`, `term_mapping`, and `query_exemplar` | Scenario-specific chart personalization, automatic term disambiguation, and personal few-shot examples |
+
+Key behavior:
+
+- **Restart-aware context:** completed session state is persisted in SQLite with an in-process LRU. A pending clarification card is process-only and expires on restart.
+- **Scenario-specific chart preferences:** a preference for trend analysis does not become an unrelated global chart setting. One-off chart wording affects only the current answer; compatible durable preferences are applied afterward.
+- **Chart switching without re-querying:** conversational or toolbar chart switching reuses the owner's stored result snapshot. Snapshots contain at most 200 rows and retain truncation information.
+- **Clarification learning:** a term choice is remembered in the current session. The same choice in three distinct sessions is promoted by default from a candidate to an active long-term mapping; candidates are not applied.
+- **Personal examples with governance:** liking a successful answer creates a personal example, while disliking withdraws it. Personal examples use literal-overlap retrieval, not vectors. The separate global-example path still requires upvotes from three distinct users.
+- **Decay without self-renewal:** effective confidence decays from `last_confirmed_at`; merely using a memory updates access statistics but does not extend its life.
+- **User control and auditability:** users can inspect and delete their memories. Supersede/delete operations are logical, so historical values and events remain for auditing. “Forget” is not physical erasure.
+- **Visible use:** applied long-term preferences and personal examples are recorded in `memory_trace` and exposed in the UI's trace section.
+
+The UI's clear button removes long-term memories only. The chat command `忘掉全部记忆` also resets the current session context. Memory never bypasses SemQL validation, SQL compilation, the security gateway, or data permissions.
+
+See the [memory system guide](docs/MEMORY_SYSTEM.md), [feature tour](docs/MEMORY_SYSTEM_FEATURES.md), and [manual acceptance checklist](docs/MEMORY_SYSTEM_TEST_SCRIPTS.md) for details and boundaries.
+
+## How It Works
+
+```text
+Question
+  -> strict memory-command handling
+  -> contextual rewrite
+  -> intent classification
+  -> dictionary/index linking + constrained LLM reranking
+  -> deterministic clarification when needed
+  -> validated SemQL generation with retries
+  -> deterministic SemQL-to-SQLite compilation
+  -> SQL security gateway and policy rewriting
+  -> read-only execution
+  -> chart rules + memory personalization
+  -> answer, summary, evidence, and traces
+
+Why/anomaly question
+  -> fluctuation detection
+  -> deterministic contribution attribution and event association
+  -> LLM narrative or template fallback
 ```
-用户提问
-  └→ 意图识别(LLM light) → 指代改写 → Schema Linking(jieba词典+LLM精排) → 澄清?
-       └→ SemQL 生成(LLM heavy, 三级重试) → 编译器(SemQL→SQLite SQL, 规则注入)
-            └→ SQL 安全网关(白名单+行/列权限+限额) → 执行器(biz SQLite)
-                 └→ 图表自动选择 → 结果 + 摘要(LLM light)
-"为什么"类问题 → 波动识别 → 归因引擎(贡献度下钻/事件关联) → LLM 结论(heavy)
-```
 
-存储：元数据 SQLite（`data/meta.db`）；演示业务库 SQLite（`test_data/data/retail.db`）；jieba 词典（`data/dict/custom_dict.txt`，发布时重建的派生物）。
+The LLM does not generate executable business SQL. Insight queries reuse the same compiler, gateway, and executor as ordinary data questions, so metric rules and row/column controls remain in the calculation path.
 
-## 环境搭建
+The semantic layer currently consists of a seed-published v1 snapshot, versioned snapshot reads, metric/dimension/term definitions, business rules, and initialization-time Evidence checks. It does not include a draft/review/approval workflow.
+
+## Quick Start
+
+### 1. Prerequisites
+
+- Python 3.10 or newer; Python 3.11 is recommended.
+- Conda for the commands below, or an equivalent Python environment manager.
+- A DeepSeek API key and network access for natural-language queries. Offline unit tests still require the configuration value at import time, although they do not call the API.
+
+From the repository root:
 
 ```bash
 conda create -n insightchat python=3.11 -y
 conda activate insightchat
-pip install -e .            # 或 pip install -r requirements.txt
+pip install -e .
 ```
 
-## .env 配置
+`pip install -r requirements.txt` is an alternative to editable installation.
 
-对照 `.env.example` 逐项填写（**DeepSeek Key 等机密只放 .env，严禁提交 git / 打印日志**）：
-
-| 键                    | 说明                                                       |
-| --------------------- | ---------------------------------------------------------- |
-| `DEEPSEEK_API_KEY`  | DeepSeek API Key（机密）                                   |
-| `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com`                          |
-| `LLM_MODEL_HEAVY`   | 重任务模型（SemQL 生成、归因结论），如 `deepseek-v4-pro` |
-| `LLM_MODEL_LIGHT`   | 轻任务模型（意图/改写/精排/摘要），如 `deepseek-flash`   |
-| `LLM_TIMEOUT_SEC`   | LLM 调用超时秒数，默认 60                                  |
-| `META_DB_PATH`      | 元数据库路径，默认 `./data/meta.db`                      |
-| `BIZ_DB_PATH`       | 业务库路径，默认 `./test_data/data/retail.db`            |
-| `AUTH_SECRET`       | token 签名密钥，生产必须改                                 |
-| `TZ_NAME`           | 业务时区，默认 `Asia/Shanghai`                           |
-| `MEMORY_*`          | 会话 TTL、LRU、澄清晋升、置信度阈值与半衰期，默认值见 `.env.example` |
-
-## 初始化
+### 2. Configure the application
 
 ```bash
-python scripts/gen_retail_data.py   # 生成演示业务库（确定性 seed=42，打印月度×区域透视表）
-python scripts/init_db.py           # 建 meta schema → 导种子 → 发布语义层 v1 → Evidence 真实复算 → 建词典
-python scripts/check_llm.py         # 验证 DeepSeek 连通（light 模型问 1+1=?）
+cp .env.example .env
 ```
 
-已有数据库可幂等重跑 `init_db.py`；服务启动也会自动补齐新增元数据表，不会重置业务数据。
+On Windows Command Prompt, use `copy .env.example .env` instead. Edit `.env` and set at least:
 
-## 运行
+| Key | Purpose |
+| --- | --- |
+| `DEEPSEEK_API_KEY` | Required API credential; keep it secret |
+| `DEEPSEEK_BASE_URL` | OpenAI-compatible endpoint; defaults to `https://api.deepseek.com` |
+| `LLM_MODEL_HEAVY` | Model for SemQL generation and insight narration |
+| `LLM_MODEL_LIGHT` | Model for intent, rewriting, reranking, and summaries |
+| `AUTH_SECRET` | HMAC token secret; replace the demo default outside local demonstrations |
+
+The model names in `.env.example` are configuration examples, not a guarantee of availability. Set them to models enabled for your DeepSeek account. Database paths, timezone, insight thresholds, and memory defaults are also documented in `.env.example`; relative database paths resolve from the project root.
+
+### 3. Initialize the demo
 
 ```bash
-python scripts/run_server.py        # 启动 FastAPI
-# 浏览器打开 http://127.0.0.1:8000
+python scripts/gen_retail_data.py
+python scripts/init_db.py
+python scripts/check_llm.py
 ```
 
-演示账号（密码均为 `Init@123456`，仅演示）：
+- `gen_retail_data.py` **recreates the demo business database** with deterministic data. Do not run it over data you need to preserve.
+- `init_db.py` creates metadata tables, imports the seed and publishes v1 when absent, executes Evidence SQL against the business database, and rebuilds the jieba dictionaries. It is safe to rerun for the normal idempotent initialization flow.
+- `check_llm.py` makes one real light-model call and verifies call logging. Omit it only if you do not want that API call.
 
-| 账号         | 角色             | 数据范围                    |
-| ------------ | ---------------- | --------------------------- |
-| `admin`    | admin            | 全部                        |
-| `analyst`  | analyst          | 全部                        |
-| `east_mgr` | analyst + 行策略 | 仅华东大区（dim_region=HD） |
-| `viewer1`  | viewer           | 仅查看                      |
+The retail demo covers **2023-06 through 2024-06**. Use explicit dates in questions: relative expressions such as “last month” use the machine's current date and can fall outside the demo data.
 
-## 用户记忆
-
-- 对话中说 `以后趋势都用折线图`、`记住销售额指净销售额`，即可保存本人偏好。
-- 图表上切换类型会学习对应数据场景的偏好；普通“本次用折线图”不会自动写长期记忆。
-- `你记得我什么` 查看，`忘掉全部记忆` 清除；也可在右上角“我的记忆”逐条管理。
-- 短期上下文默认保留 72 小时并支持服务重启恢复；长期偏好按半衰期衰减，失效不删除审计历史。
-
-设计、API、配置与测试场景详见 `docs/MEMORY_SYSTEM.md`。
-
-## 测试
+### 4. Start and use the application
 
 ```bash
-python -m pytest tests/ -q            # 单元测试（不依赖 LLM）：semql/compiler/gateway/attribution/chart/memory
-python scripts/dev_query.py           # 不走 LLM：手工 SemQL 跑 compile→gateway→execute
-python scripts/dev_e2e_llm.py         # 真实 LLM：q01 端到端 + q04 澄清
-python scripts/dev_insight.py         # 归因引擎全量 JSON + narrative
-python scripts/dev_chat.py            # 对话编排：q01/q06/q09 两轮
-python scripts/run_pipeline_test.py   # q01-q12 全链路回归，输出 test_data/output/report.md
+python scripts/run_server.py
 ```
 
-## 目录结构
+Open <http://127.0.0.1:8000>. The server listens on loopback only. Stop it with `Ctrl+C`.
 
+Demo accounts all use password `Init@123456`:
+
+| Account | Role and behavior |
+| --- | --- |
+| `analyst` | Full demo querying; recommended for the main walkthrough |
+| `east_mgr` | Analyst plus a row policy restricting results to East China (`HD`) |
+| `admin` | Administrative role guards and full demo data |
+| `viewer1` | Viewer role; `/chat/ask` is blocked, useful for checking role boundaries |
+
+For a portable step-by-step guide and troubleshooting, see the [Runbook](docs/RUNBOOK.md).
+
+## Tests and Validation
+
+Run the standard suite after configuration and metadata initialization:
+
+```bash
+python -m pytest tests/ -q
 ```
-chatbi/
-├── chatbi/                 # 包
-│   ├── config.py / db.py / llm.py / security.py
-│   ├── semantic/           # schema.py(建表) store.py(快照/版本) seed.py dictionary.py seed/ontology_seed.yaml
-│   ├── nlp/                # prompts.py intent.py rewrite.py linking.py clarify.py
-│   ├── query/              # semql.py generator.py compiler.py gateway.py executor.py
-│   ├── insight/            # fluctuation.py attribution.py narrative.py
-│   ├── chart/rules.py
-│   ├── services/           # chat_service.py query_service.py memory.py auth.py history.py feedback.py
-│   └── api/                # main.py deps.py routes_*.py static/index.html
-├── scripts/                # init_db.py gen_retail_data.py check_llm.py run_server.py dev_*.py run_pipeline_test.py
-├── tests/                  # pytest（不依赖 LLM）
-└── test_data/              # input/questions.json expected/expectations.json data/retail.db output/
+
+The unit tests make no LLM calls. Some tests load the initialized semantic snapshot, and importing project configuration requires `DEEPSEEK_API_KEY` to be present.
+
+Additional checks:
+
+```bash
+python scripts/dev_query.py           # No LLM: compile, gateway, permissions, execution
+python scripts/dev_e2e_llm.py         # Real LLM: query and clarification
+python scripts/dev_insight.py         # Real LLM narrative plus deterministic attribution
+python scripts/dev_chat.py            # Real LLM: query, insight, and follow-up orchestration
+python scripts/run_pipeline_test.py   # Real LLM: q01-q12 regression; writes test_data/output/
 ```
+
+The full pipeline and most development scripts incur model API calls. The manual memory checklist covers UI behavior that the unit suite does not fully exercise.
+
+## Documentation
+
+- [Runbook](docs/RUNBOOK.md): installation, startup, reset cautions, and troubleshooting.
+- [Implementation overview](docs/IMPLEMENTATION_SPEC.md): actual architecture, modules, APIs, data, and limitations.
+- [Memory system](docs/MEMORY_SYSTEM.md): storage, learning, decay, APIs, security, and degradation.
+- [Memory features and design highlights](docs/MEMORY_SYSTEM_FEATURES.md): a shorter user-oriented tour.
+- [Memory manual acceptance checklist](docs/MEMORY_SYSTEM_TEST_SCRIPTS.md): reproducible UI scenarios with side effects and cleanup.
+- [Permissions](docs/PERMISSIONS.md): authentication, role guards, row/column controls, gateway enforcement, and known gaps.
+
+## Current Boundaries
+
+InsightChat is a local demonstration, not a production deployment package. It currently uses one process, one SQLite business database, and a seed-centric semantic publishing flow. Pending clarifications and the context cache are process-local. The HMAC token has no server-side revocation, dataset policies are not strongly enforced in the query path, and the frontend does not restore prior transcripts when a session is selected. The implementation and permissions guides describe these limits in detail.
